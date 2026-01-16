@@ -10,4 +10,4 @@ train.py \
 --config_path configs/self_forcing_14b_dmd.yaml \
 --logdir logs/self_forcing_14b_dmd \
 --no_visualize \
---disable-wandb
+# --disable-wandb

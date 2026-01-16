@@ -14,7 +14,7 @@ Self-Forcing-Plus focuses on step distillation and CFG distillation for bidirect
 ## Installation
 Create a conda environment and install dependencies:
 ```
-conda create -n self_forcing python=3.10 -y
+conda create -p /home/ec2-user/SageMaker/efs/conda_envs/self_forcing python=3.10 -y
 conda activate self_forcing
 pip install -r requirements.txt
 pip install flash-attn --no-build-isolation
@@ -24,8 +24,8 @@ python setup.py develop
 ## Quick Start
 ### Download checkpoints
 ```
-huggingface-cli download Wan-AI/Wan2.1-T2V-14B --local-dir wan_models/Wan2.1-T2V-14B
-huggingface-cli download Wan-AI/Wan2.1-I2V-14B-480P --local-dir wan_models/Wan2.1-I2V-14B-480P
+huggingface-cli download Wan-AI/Wan2.1-T2V-14B --local-dir /home/ec2-user/SageMaker/efs/Models/wan_models/Wan2.1-T2V-14B
+huggingface-cli download Wan-AI/Wan2.1-I2V-14B-480P --local-dir /home/ec2-user/SageMaker/efs/Models/wan_models/Wan2.1-I2V-14B-480P
 ```
 
 ## T2V Training

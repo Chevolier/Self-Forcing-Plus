@@ -3,10 +3,10 @@ i2v: false
 generator_fsdp_wrap_strategy: size
 real_score_fsdp_wrap_strategy: size
 fake_score_fsdp_wrap_strategy: size
-real_name: Wan2.1-T2V-14B
-fake_name: Wan2.1-T2V-14B
+real_name: /home/ec2-user/SageMaker/efs/Models/wan_models/Wan2.1-T2V-14B
+fake_name: /home/ec2-user/SageMaker/efs/Models/wan_models/Wan2.1-T2V-14B
 generator_type: bidirectional
-generator_name: Wan2.1-T2V-14B
+generator_name: /home/ec2-user/SageMaker/efs/Models/wan_models/Wan2.1-T2V-14B
 text_encoder_fsdp_wrap_strategy: size
 text_encoder_cpu_offload: false
 denoising_step_list:
@@ -22,10 +22,10 @@ guidance_scale: 4.0
 denoising_loss_type: flow
 mixed_precision: true
 seed: 0
-wandb_host: WANDB_HOST
-wandb_key: WANDB_KEY
-wandb_entity: WANDB_ENTITY
-wandb_project: WANDB_PROJECT
+wandb_host: "https://api.wandb.ai/"
+wandb_key: "0d32276b8b4b08bb83ecd160d941dba83b3b4975"
+wandb_entity: "genai-view"
+wandb_project: "qwen-image-edit-dmd"
 sharding_strategy: full
 lr: 2.0e-06
 lr_critic: 4.0e-07
@@ -34,7 +34,7 @@ beta2: 0.999
 beta1_critic: 0.0
 beta2_critic: 0.999
 data_type: text_folder
-data_path: prompts/good_prompts/
+data_path: data/t2v/
 data_max_count: 30000
 batch_size: 1
 ema_weight: 0.99
