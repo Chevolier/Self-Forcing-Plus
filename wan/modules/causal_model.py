@@ -499,8 +499,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.num_frame_per_block = 1
         self.independent_first_frame = False
 
-    def _set_gradient_checkpointing(self, module, value=False):
-        self.gradient_checkpointing = value
+    def _set_gradient_checkpointing(self, enable=True, gradient_checkpointing_func=None):
+        # Compatible with newer diffusers API
+        self.gradient_checkpointing = enable
 
     @staticmethod
     def _prepare_blockwise_causal_attn_mask(
