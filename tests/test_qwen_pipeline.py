@@ -5,12 +5,35 @@ Unit tests for QwenImageTrainingPipeline and QwenImageInferencePipeline.
 import pytest
 import torch
 from unittest.mock import Mock, MagicMock, patch
+import sys
 
-from pipeline.qwen_image_training import (
-    QwenImageTrainingPipeline,
-    QwenImageInferencePipeline,
-)
+# Mock heavy dependencies before importing pipeline modules
+wan_mock = MagicMock()
+sys.modules['wan'] = wan_mock
+sys.modules['wan.utils'] = wan_mock.utils
+sys.modules['wan.utils.fm_solvers'] = wan_mock.utils.fm_solvers
+sys.modules['wan.utils.fm_solvers_unipc'] = wan_mock.utils.fm_solvers_unipc
+sys.modules['wan.configs'] = wan_mock.configs
+sys.modules['wan.distributed'] = wan_mock.distributed
+sys.modules['wan.modules'] = wan_mock.modules
+
+# Mock pipeline modules that have heavy dependencies
+pipeline_mock = MagicMock()
+sys.modules['pipeline.bidirectional_diffusion_inference'] = pipeline_mock
+sys.modules['pipeline.bidirectional_training'] = pipeline_mock
+
 from utils.qwen_wrapper import QwenFlowMatchScheduler
+
+# Import pipeline modules directly to avoid __init__.py
+import importlib.util
+spec = importlib.util.spec_from_file_location(
+    "qwen_image_training",
+    "/home/ec2-user/SageMaker/efs/Projects/Self-Forcing-Plus/pipeline/qwen_image_training.py"
+)
+qwen_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(qwen_module)
+QwenImageTrainingPipeline = qwen_module.QwenImageTrainingPipeline
+QwenImageInferencePipeline = qwen_module.QwenImageInferencePipeline
 
 
 class MockGenerator:
