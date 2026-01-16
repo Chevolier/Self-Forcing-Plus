@@ -20,6 +20,8 @@ i2v: false
 # LoRA configuration
 lora_rank: 32
 lora_alpha: 32
+# Target modules for LoRA - must be nn.Linear layers, not Sequential containers
+# Use ".0" suffix for Linear layers inside Sequential (e.g., to_out.0 not to_out)
 lora_target_modules: "to_q,to_k,to_v,add_q_proj,add_k_proj,add_v_proj,to_out.0,to_add_out"
 
 # Scheduler
@@ -104,8 +106,8 @@ sharding_strategy: full
 
 # Wandb settings
 wandb_host: "https://api.wandb.ai/"
-wandb_key: ""
-wandb_entity: ""
-wandb_project: "qwen-image-dmd"
+wandb_key: "0d32276b8b4b08bb83ecd160d941dba83b3b4975"
+wandb_entity: "genai-view"
+wandb_project: "qwen-image-edit-dmd"
 wandb_save_dir: "./wandb"
-disable_wandb: true  # Set to false and fill in key/entity to enable
+disable_wandb: false  # Set to false and fill in key/entity to enable

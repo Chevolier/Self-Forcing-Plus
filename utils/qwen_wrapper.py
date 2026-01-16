@@ -304,6 +304,7 @@ class QwenDiffusionWrapper(nn.Module):
         mu: float = 0.8,
         lora_rank: int = 64,
         lora_alpha: int = 64,
+        lora_target_modules: List[str] = None,
         enable_lora: bool = False,
     ):
         super().__init__()
@@ -327,10 +328,11 @@ class QwenDiffusionWrapper(nn.Module):
         # LoRA configuration
         self.lora_rank = lora_rank
         self.lora_alpha = lora_alpha
+        self.lora_target_modules = lora_target_modules
         self.lora_enabled = False
 
         if enable_lora:
-            self._add_lora_layers()
+            self._add_lora_layers(target_modules=lora_target_modules)
 
     @property
     def blocks(self):
@@ -355,21 +357,41 @@ class QwenDiffusionWrapper(nn.Module):
             self.model.load_state_dict(state_dict, strict=False)
             print(f"Loaded DiT from {path}")
 
-    def _add_lora_layers(self):
-        """Add LoRA adapters to attention layers."""
+    def _add_lora_layers(self, target_modules: List[str] = None):
+        """Add LoRA adapters to attention layers.
+
+        Args:
+            target_modules: List of module names to apply LoRA to.
+                For Qwen DiT, valid targets include:
+                - "to_q", "to_k", "to_v" - query/key/value projections
+                - "add_q_proj", "add_k_proj", "add_v_proj" - text cross-attention
+                - "to_out.0" - output projection (inside Sequential)
+                - "to_add_out" - text output projection
+                - "img_mod.1", "txt_mod.1" - modulation layers (inside Sequential)
+        """
         try:
             from peft import LoraConfig, get_peft_model
+
+            # Default target modules - only Linear layers, not Sequential containers
+            if target_modules is None:
+                target_modules = [
+                    "to_q", "to_k", "to_v",  # Image attention
+                    "add_q_proj", "add_k_proj", "add_v_proj",  # Text cross-attention
+                    "to_out.0",  # Output projection (Linear inside Sequential)
+                    "to_add_out",  # Text output projection
+                ]
 
             lora_config = LoraConfig(
                 r=self.lora_rank,
                 lora_alpha=self.lora_alpha,
-                target_modules=["to_q", "to_k", "to_v", "to_out"],
+                target_modules=target_modules,
                 lora_dropout=0.0,
                 bias="none",
             )
             self.model = get_peft_model(self.model, lora_config)
             self.lora_enabled = True
             print(f"Added LoRA with rank={self.lora_rank}, alpha={self.lora_alpha}")
+            print(f"LoRA target modules: {target_modules}")
         except ImportError:
             print("Warning: peft not installed, LoRA disabled")
             self._add_manual_lora()

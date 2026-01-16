@@ -90,12 +90,18 @@ class QwenDMD(nn.Module):
         """Initialize generator, real_score, fake_score, text_encoder, and VAE."""
         mu = getattr(args, "scheduler_mu", 0.8)
 
+        # Parse LoRA target modules from config (comma-separated string or list)
+        lora_target_modules = getattr(args, "lora_target_modules", None)
+        if isinstance(lora_target_modules, str):
+            lora_target_modules = [m.strip() for m in lora_target_modules.split(",")]
+
         # Generator with LoRA (trainable)
         self.generator = QwenDiffusionWrapper(
             model_name=self.generator_name,
             mu=mu,
             lora_rank=self.lora_rank,
             lora_alpha=self.lora_alpha,
+            lora_target_modules=lora_target_modules,
             enable_lora=True,
         )
         # Only LoRA parameters are trainable
@@ -115,6 +121,7 @@ class QwenDMD(nn.Module):
             mu=mu,
             lora_rank=self.lora_rank,
             lora_alpha=self.lora_alpha,
+            lora_target_modules=lora_target_modules,
             enable_lora=True,
         )
         self._freeze_base_enable_lora(self.fake_score)

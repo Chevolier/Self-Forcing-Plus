@@ -26,5 +26,5 @@ torchrun --nnodes=1 --nproc_per_node=${NUM_GPUS} \
     --config_path ${CONFIG_PATH} \
     --logdir ${LOG_DIR} \
     --no_visualize \
-    --disable-wandb \
+    # --disable-wandb \
     "$@"
