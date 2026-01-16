@@ -102,8 +102,10 @@ text_encoder_cpu_offload: true
 sharding_strategy: full
 # Sharding strategies: "full", "hybrid_full", "hybrid_zero2", "no_shard"
 
-# Wandb (optional - uncomment to enable)
-# wandb_host: "https://api.wandb.ai/"
-# wandb_key: "your-key"
-# wandb_entity: "your-entity"
-# wandb_project: "qwen-image-dmd"
+# Wandb settings
+wandb_host: "https://api.wandb.ai/"
+wandb_key: ""
+wandb_entity: ""
+wandb_project: "qwen-image-dmd"
+wandb_save_dir: "./wandb"
+disable_wandb: true  # Set to false and fill in key/entity to enable
