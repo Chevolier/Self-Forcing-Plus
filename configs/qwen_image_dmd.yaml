@@ -1,0 +1,93 @@
+# Qwen-Image-Edit DMD Training Configuration
+# Uses LoRA for memory-efficient training with 8-step denoising
+
+# Model paths
+generator_name: /path/to/Qwen-Image-Edit-2509
+real_name: /path/to/Qwen-Image-Edit-2509
+fake_name: /path/to/Qwen-Image-Edit-2509
+
+# Model type
+model_type: qwen_dmd
+generator_type: bidirectional
+i2v: false
+
+# LoRA configuration
+lora_rank: 64
+lora_alpha: 64
+
+# Scheduler
+scheduler_mu: 0.8
+
+# 8-step denoising schedule
+denoising_step_list:
+- 1000
+- 875
+- 750
+- 625
+- 500
+- 375
+- 250
+- 125
+
+# Training hyperparameters
+num_train_timestep: 1000
+ts_schedule: true
+ts_schedule_max: false
+timestep_shift: 1.0
+min_score_timestep: 0
+
+# CFG
+guidance_scale: 4.0
+real_guidance_scale: 4.0
+fake_guidance_scale: 0.0
+
+# Loss
+denoising_loss_type: flow
+distribution_loss: qwen_dmd
+trainer: score_distillation
+
+# Training settings
+mixed_precision: true
+gradient_checkpointing: true
+seed: 0
+
+# Optimizer
+lr: 2.0e-05
+lr_critic: 4.0e-06
+beta1: 0.9
+beta2: 0.999
+beta1_critic: 0.9
+beta2_critic: 0.999
+
+# Data
+data_type: image_edit
+data_path: data/image_edit/
+batch_size: 1
+total_batch_size: 32
+
+# Update ratio: train critic more frequently than generator
+dfake_gen_update_ratio: 5
+
+# Image dimensions
+height: 1024
+width: 1024
+
+# Logging
+log_iters: 100
+ema_weight: 0.99
+ema_start_step: 200
+
+# Negative prompt for CFG
+negative_prompt: "blurry, low quality, distorted, ugly, bad anatomy, wrong proportions"
+
+# FSDP settings (for distributed training)
+generator_fsdp_wrap_strategy: size
+real_score_fsdp_wrap_strategy: size
+fake_score_fsdp_wrap_strategy: size
+text_encoder_fsdp_wrap_strategy: size
+text_encoder_cpu_offload: true
+sharding_strategy: full
+
+# Wandb (optional)
+# wandb_entity: "your-entity"
+# wandb_project: "qwen-image-dmd"

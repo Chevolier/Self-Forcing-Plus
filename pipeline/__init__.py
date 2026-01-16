@@ -4,6 +4,7 @@ from .bidirectional_training import BidirectionalTrainingPipeline
 from .causal_diffusion_inference import CausalDiffusionInferencePipeline
 from .causal_inference import CausalInferencePipeline
 from .self_forcing_training import SelfForcingTrainingPipeline
+from .qwen_image_training import QwenImageTrainingPipeline, QwenImageInferencePipeline
 
 __all__ = [
     "BidirectionalDiffusionInferencePipeline",
@@ -11,5 +12,7 @@ __all__ = [
     "BidirectionalTrainingPipeline",
     "CausalDiffusionInferencePipeline",
     "CausalInferencePipeline",
-    "SelfForcingTrainingPipeline"
+    "SelfForcingTrainingPipeline",
+    "QwenImageTrainingPipeline",
+    "QwenImageInferencePipeline",
 ]

@@ -2,7 +2,7 @@ import gc
 import logging
 
 from utils.dataset import ShardingLMDBDataset, cycle
-from utils.dataset import TextDataset, TextFolderDataset
+from utils.dataset import TextDataset, TextFolderDataset, ImageEditDataset
 from utils.distributed import EMA_FSDP, fsdp_wrap, fsdp_state_dict, launch_distributed_job
 from utils.misc import (
     set_seed,
@@ -10,7 +10,7 @@ from utils.misc import (
 )
 import torch.distributed as dist
 from omegaconf import OmegaConf
-from model import CausVid, DMD, SiD
+from model import CausVid, DMD, SiD, QwenDMD
 import torch
 import wandb
 import time
@@ -58,12 +58,15 @@ class Trainer:
         self.output_path = config.logdir
 
         # Step 2: Initialize the model and optimizer
+        self.is_qwen = config.distribution_loss == "qwen_dmd"
         if config.distribution_loss == "causvid":
             self.model = CausVid(config, device=self.device)
         elif config.distribution_loss == "dmd":
             self.model = DMD(config, device=self.device)
         elif config.distribution_loss == "sid":
             self.model = SiD(config, device=self.device)
+        elif config.distribution_loss == "qwen_dmd":
+            self.model = QwenDMD(config, device=self.device)
         else:
             raise ValueError("Invalid distribution matching loss")
 
@@ -134,6 +137,15 @@ class Trainer:
         # Step 3: Initialize the dataloader
         if self.config.i2v:
             dataset = ShardingLMDBDataset(config.data_path, max_pair=int(1e8))
+        elif self.is_qwen:
+            # Qwen image edit dataset
+            data_max_count = config.get("data_max_count", 100000)
+            dataset = ImageEditDataset(
+                config.data_path,
+                height=getattr(config, "height", 1024),
+                width=getattr(config, "width", 1024),
+                max_count=data_max_count,
+            )
         else:
             if self.config.data_type == "text_folder":
                 data_max_count = config.get("data_max_count", 30000)
@@ -268,6 +280,11 @@ class Trainer:
 
         # Step 1: Get the next batch of text prompts
         text_prompts = batch["prompts"]
+
+        # Handle QwenDMD separately
+        if self.is_qwen:
+            return self._fwdbwd_one_step_qwen(batch, train_generator, text_prompts)
+
         if self.config.i2v:
             clean_latent = None
             image_latent = batch["ode_latent"][:, -1][:, 0:1, ].to(
@@ -344,6 +361,72 @@ class Trainer:
 
         critic_log_dict.update({"critic_loss": critic_loss,
                                 "critic_grad_norm": critic_grad_norm})
+
+        return critic_log_dict
+
+    def _fwdbwd_one_step_qwen(self, batch, train_generator, text_prompts):
+        """Forward-backward step for QwenDMD model."""
+        batch_size = len(text_prompts)
+
+        # Encode text prompts
+        with torch.no_grad():
+            conditional_dict = self.model.encode_text(text_prompts)
+
+            if not getattr(self, "unconditional_dict", None):
+                unconditional_dict = self.model.encode_text(
+                    [self.config.negative_prompt] * batch_size
+                )
+                unconditional_dict = {k: v.detach() for k, v in unconditional_dict.items()}
+                self.unconditional_dict = unconditional_dict
+            else:
+                unconditional_dict = self.unconditional_dict
+
+            # Encode source image if available
+            edit_latent = None
+            if batch.get("source_image") is not None and batch["source_image"][0] is not None:
+                source_images = batch["source_image"].to(device=self.device, dtype=self.dtype)
+                edit_latent = self.model.encode_image(source_images)
+
+        # Train generator
+        if train_generator:
+            generator_loss, generator_log_dict = self.model.generator_loss(
+                batch_size=batch_size,
+                conditional_dict=conditional_dict,
+                unconditional_dict=unconditional_dict,
+                edit_latent=edit_latent,
+            )
+
+            torch.cuda.empty_cache()
+
+            generator_loss.backward()
+            generator_grad_norm = self.model.generator.clip_grad_norm_(
+                self.max_grad_norm_generator
+            )
+
+            generator_log_dict.update({
+                "generator_loss": generator_loss,
+                "generator_grad_norm": generator_grad_norm,
+            })
+
+            return generator_log_dict
+
+        # Train critic
+        critic_loss, critic_log_dict = self.model.critic_loss(
+            batch_size=batch_size,
+            conditional_dict=conditional_dict,
+            unconditional_dict=unconditional_dict,
+            edit_latent=edit_latent,
+        )
+
+        critic_loss.backward()
+        critic_grad_norm = self.model.fake_score.clip_grad_norm_(
+            self.max_grad_norm_critic
+        )
+
+        critic_log_dict.update({
+            "critic_loss": critic_loss,
+            "critic_grad_norm": critic_grad_norm,
+        })
 
         return critic_log_dict
 

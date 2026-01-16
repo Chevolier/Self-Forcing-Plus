@@ -244,6 +244,113 @@ class TextImagePairDataset(Dataset):
         }
 
 
+class ImageEditDataset(Dataset):
+    """Dataset for image editing with source images and edit prompts."""
+
+    def __init__(
+        self,
+        data_path: str,
+        height: int = 1024,
+        width: int = 1024,
+        max_count: int = 100000,
+    ):
+        """
+        Args:
+            data_path: Path to directory containing:
+                - images/ subdirectory with source images
+                - prompts/ subdirectory with text files (or prompts.txt with one per line)
+            height: Target image height
+            width: Target image width
+            max_count: Maximum number of samples to load
+        """
+        self.height = height
+        self.width = width
+        self.samples = []
+
+        data_path = Path(data_path)
+
+        # Option 1: images/ and prompts/ directories
+        images_dir = data_path / "images"
+        prompts_dir = data_path / "prompts"
+
+        if images_dir.exists() and prompts_dir.exists():
+            # Match images with prompts by filename
+            for img_file in sorted(images_dir.glob("*")):
+                if img_file.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]:
+                    # Look for matching prompt file
+                    prompt_file = prompts_dir / f"{img_file.stem}.txt"
+                    if prompt_file.exists():
+                        with open(prompt_file, "r") as f:
+                            prompt = f.read().strip()
+                        self.samples.append({
+                            "image_path": str(img_file),
+                            "prompt": prompt,
+                        })
+                        if len(self.samples) >= max_count:
+                            break
+
+        # Option 2: metadata.json file
+        elif (data_path / "metadata.json").exists():
+            with open(data_path / "metadata.json", "r") as f:
+                metadata = json.load(f)
+            for item in metadata[:max_count]:
+                image_path = data_path / item.get("image", item.get("source_image", ""))
+                if image_path.exists():
+                    self.samples.append({
+                        "image_path": str(image_path),
+                        "prompt": item.get("prompt", item.get("edit_prompt", "")),
+                    })
+
+        # Option 3: Just prompts (for text-to-image without source)
+        elif (data_path / "prompts.txt").exists():
+            with open(data_path / "prompts.txt", "r") as f:
+                prompts = [line.strip() for line in f if line.strip()]
+            for prompt in prompts[:max_count]:
+                self.samples.append({
+                    "image_path": None,
+                    "prompt": prompt,
+                })
+
+        # Option 4: Folder of text files (like TextFolderDataset)
+        else:
+            for file in sorted(os.listdir(data_path)):
+                if file.endswith(".txt"):
+                    with open(data_path / file, "r") as f:
+                        prompt = f.read().strip()
+                    self.samples.append({
+                        "image_path": None,
+                        "prompt": prompt,
+                    })
+                    if len(self.samples) >= max_count:
+                        break
+
+        print(f"ImageEditDataset: loaded {len(self.samples)} samples")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        result = {
+            "prompts": sample["prompt"],
+            "idx": idx,
+        }
+
+        # Load source image if available
+        if sample["image_path"] is not None:
+            image = Image.open(sample["image_path"]).convert("RGB")
+            # Resize to target size
+            image = image.resize((self.width, self.height), Image.LANCZOS)
+            # Convert to tensor and normalize to [-1, 1]
+            image = TF.to_tensor(image)
+            image = image * 2.0 - 1.0  # Scale from [0,1] to [-1,1]
+            result["source_image"] = image
+        else:
+            result["source_image"] = None
+
+        return result
+
+
 def cycle(dl):
     while True:
         for data in dl:
