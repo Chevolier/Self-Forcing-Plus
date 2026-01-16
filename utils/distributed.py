@@ -5,7 +5,72 @@ import torch
 import torch.distributed as dist
 from torch.distributed.fsdp import FullStateDictConfig, FullyShardedDataParallel as FSDP, MixedPrecision, ShardingStrategy, StateDictType
 from torch.distributed.fsdp.api import CPUOffload
-from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, transformer_auto_wrap_policy
+from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, transformer_auto_wrap_policy, lambda_auto_wrap_policy
+
+
+# Import Qwen transformer blocks for FSDP wrapping
+try:
+    from qwen.models.qwen_image_dit import QwenImageTransformerBlock
+    QWEN_TRANSFORMER_BLOCK = QwenImageTransformerBlock
+except ImportError:
+    QWEN_TRANSFORMER_BLOCK = None
+
+
+def shard_qwen_model(
+    model,
+    device_id,
+    param_dtype=torch.bfloat16,
+    reduce_dtype=torch.float32,
+    buffer_dtype=torch.float32,
+    process_group=None,
+    sharding_strategy=ShardingStrategy.FULL_SHARD,
+    sync_module_states=True,
+):
+    """
+    Shard a Qwen model using FSDP with transformer block-level wrapping.
+    Similar to wan/distributed/fsdp.py shard_model but for Qwen models.
+
+    Args:
+        model: QwenDiffusionWrapper or model with `blocks` attribute
+        device_id: GPU device ID
+        param_dtype: Parameter dtype for mixed precision
+        reduce_dtype: Reduction dtype for gradients
+        buffer_dtype: Buffer dtype
+        process_group: Process group for distributed training
+        sharding_strategy: FSDP sharding strategy
+        sync_module_states: Whether to sync module states across ranks
+
+    Returns:
+        FSDP-wrapped model
+    """
+    # Get the transformer blocks for wrapping
+    if hasattr(model, 'blocks'):
+        blocks = model.blocks
+    elif hasattr(model, 'transformer_blocks'):
+        blocks = model.transformer_blocks
+    elif hasattr(model, 'model') and hasattr(model.model, 'transformer_blocks'):
+        blocks = model.model.transformer_blocks
+    else:
+        raise ValueError("Model does not have blocks/transformer_blocks attribute for FSDP wrapping")
+
+    model = FSDP(
+        module=model,
+        process_group=process_group,
+        sharding_strategy=sharding_strategy,
+        auto_wrap_policy=partial(
+            lambda_auto_wrap_policy,
+            lambda_fn=lambda m: m in blocks
+        ),
+        mixed_precision=MixedPrecision(
+            param_dtype=param_dtype,
+            reduce_dtype=reduce_dtype,
+            buffer_dtype=buffer_dtype
+        ),
+        device_id=device_id,
+        use_orig_params=True,
+        sync_module_states=sync_module_states
+    )
+    return model
 
 
 def fsdp_state_dict(model):
@@ -40,6 +105,30 @@ def fsdp_wrap(module, sharding_strategy="full", mixed_precision=False, wrap_stra
         auto_wrap_policy = partial(
             size_based_auto_wrap_policy,
             min_num_params=min_num_params
+        )
+    elif wrap_strategy == "qwen":
+        # Use Qwen transformer blocks for wrapping via transformer_auto_wrap_policy
+        if QWEN_TRANSFORMER_BLOCK is None:
+            raise ImportError("Qwen transformer block not available. Install qwen package.")
+        auto_wrap_policy = partial(
+            transformer_auto_wrap_policy,
+            transformer_layer_cls={QWEN_TRANSFORMER_BLOCK}
+        )
+    elif wrap_strategy == "qwen_blocks":
+        # Lambda-based wrapping using model.blocks attribute (like Wan's approach)
+        # This requires the model to have a 'blocks' or 'transformer_blocks' attribute
+        # Get blocks from module for the lambda
+        if hasattr(module, 'blocks'):
+            blocks = list(module.blocks)
+        elif hasattr(module, 'transformer_blocks'):
+            blocks = list(module.transformer_blocks)
+        elif hasattr(module, 'model') and hasattr(module.model, 'transformer_blocks'):
+            blocks = list(module.model.transformer_blocks)
+        else:
+            raise ValueError("Model does not have blocks attribute for qwen_blocks wrap strategy")
+        auto_wrap_policy = partial(
+            lambda_auto_wrap_policy,
+            lambda_fn=lambda m: m in blocks
         )
     else:
         raise ValueError(f"Invalid wrap strategy: {wrap_strategy}")

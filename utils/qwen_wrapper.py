@@ -294,7 +294,7 @@ class QwenVAEWrapper(nn.Module):
 
 class QwenDiffusionWrapper(nn.Module):
     """
-    Wrapper for Qwen-Image DiT model with LoRA support.
+    Wrapper for Qwen-Image DiT model with LoRA and FSDP support.
     Similar to WanDiffusionWrapper but for image editing.
     """
 
@@ -331,6 +331,16 @@ class QwenDiffusionWrapper(nn.Module):
 
         if enable_lora:
             self._add_lora_layers()
+
+    @property
+    def blocks(self):
+        """Expose transformer blocks for FSDP wrapping (compatible with Wan API)."""
+        return self.model.transformer_blocks
+
+    @property
+    def transformer_blocks(self):
+        """Alias for blocks, matching the internal DiT attribute name."""
+        return self.model.transformer_blocks
 
     def _load_weights(self, path: str):
         """Load DiT weights."""

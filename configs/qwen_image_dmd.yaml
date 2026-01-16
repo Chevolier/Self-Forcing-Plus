@@ -90,12 +90,17 @@ no_visualize: true
 negative_prompt: "blurry, low quality, distorted, ugly, bad anatomy, wrong proportions, watermark, text"
 
 # FSDP settings (for distributed training)
-generator_fsdp_wrap_strategy: size
-real_score_fsdp_wrap_strategy: size
-fake_score_fsdp_wrap_strategy: size
-text_encoder_fsdp_wrap_strategy: size
+# Available wrap strategies:
+#   - "size": Size-based wrapping (default, works for any model)
+#   - "qwen": Wraps QwenImageTransformerBlock layers (optimal for Qwen DiT)
+#   - "transformer": Custom transformer layer wrapping
+generator_fsdp_wrap_strategy: qwen
+real_score_fsdp_wrap_strategy: qwen
+fake_score_fsdp_wrap_strategy: qwen
+text_encoder_fsdp_wrap_strategy: size  # Text encoder uses size-based wrapping
 text_encoder_cpu_offload: true
 sharding_strategy: full
+# Sharding strategies: "full", "hybrid_full", "hybrid_zero2", "no_shard"
 
 # Wandb (optional - uncomment to enable)
 # wandb_host: "https://api.wandb.ai/"
