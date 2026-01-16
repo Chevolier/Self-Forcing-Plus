@@ -46,7 +46,7 @@ min_score_timestep: 0
 # CFG
 guidance_scale: 4.0
 real_guidance_scale: 4.0
-fake_guidance_scale: 0.0
+fake_guidance_scale: 1.0
 
 # Loss
 denoising_loss_type: flow
@@ -83,8 +83,8 @@ total_batch_size: 32
 dfake_gen_update_ratio: 5
 
 # Image dimensions
-height: 1024
-width: 1024
+height: 1785
+width: 1340
 
 # Logging
 log_iters: 100
