@@ -245,7 +245,16 @@ class TextImagePairDataset(Dataset):
 
 
 class ImageEditDataset(Dataset):
-    """Dataset for image editing with source images and edit prompts."""
+    """
+    Dataset for image editing with CSV metadata support.
+    Compatible with DiffSynth-Studio data format.
+
+    Supports multiple data formats:
+    1. CSV with edit_image_keys and label_image_key (DiffSynth-Studio style)
+    2. Simple folder with images/ and prompts/ directories
+    3. metadata.json file
+    4. Folder of text files (prompts only)
+    """
 
     def __init__(
         self,
@@ -253,78 +262,162 @@ class ImageEditDataset(Dataset):
         height: int = 1024,
         width: int = 1024,
         max_count: int = 100000,
+        # CSV-specific arguments (DiffSynth-Studio compatible)
+        metadata_path: str = None,
+        data_file_keys: str = None,  # Comma-separated, e.g., "label_image,cloth_image,model_image"
+        edit_image_keys: str = None,  # Comma-separated, e.g., "cloth_image,model_image"
+        label_image_key: str = None,  # e.g., "label_image"
+        fixed_prompt: str = None,  # Fixed prompt for all samples
     ):
         """
         Args:
-            data_path: Path to directory containing:
-                - images/ subdirectory with source images
-                - prompts/ subdirectory with text files (or prompts.txt with one per line)
+            data_path: Base path for the dataset (resolves relative paths in CSV)
             height: Target image height
             width: Target image width
             max_count: Maximum number of samples to load
+            metadata_path: Path to CSV/JSON metadata file
+            data_file_keys: Comma-separated column names containing file paths
+            edit_image_keys: Comma-separated column names for edit input images
+            label_image_key: Column name for target/label image
+            fixed_prompt: Fixed prompt to use for all samples (overrides CSV prompt column)
         """
         self.height = height
         self.width = width
+        self.base_path = Path(data_path)
+        self.fixed_prompt = fixed_prompt
         self.samples = []
 
-        data_path = Path(data_path)
+        # Parse comma-separated keys
+        self.data_file_keys = data_file_keys.split(",") if data_file_keys else []
+        self.edit_image_keys = edit_image_keys.split(",") if edit_image_keys else []
+        self.label_image_key = label_image_key
 
+        # Determine metadata path
+        if metadata_path is not None:
+            self._load_from_metadata(metadata_path, max_count)
+        elif (self.base_path / "train_data.csv").exists():
+            self._load_from_metadata(str(self.base_path / "train_data.csv"), max_count)
+        elif (self.base_path / "metadata.csv").exists():
+            self._load_from_metadata(str(self.base_path / "metadata.csv"), max_count)
+        else:
+            self._load_from_directory(max_count)
+
+        print(f"ImageEditDataset: loaded {len(self.samples)} samples")
+
+    def _load_from_metadata(self, metadata_path: str, max_count: int):
+        """Load data from CSV or JSON metadata file."""
+        import pandas as pd
+
+        metadata_path = Path(metadata_path)
+
+        if metadata_path.suffix == ".csv":
+            df = pd.read_csv(metadata_path)
+            data = [df.iloc[i].to_dict() for i in range(min(len(df), max_count))]
+        elif metadata_path.suffix == ".json":
+            with open(metadata_path, "r") as f:
+                data = json.load(f)[:max_count]
+        elif metadata_path.suffix == ".jsonl":
+            data = []
+            with open(metadata_path, "r") as f:
+                for i, line in enumerate(f):
+                    if i >= max_count:
+                        break
+                    data.append(json.loads(line.strip()))
+        else:
+            raise ValueError(f"Unsupported metadata format: {metadata_path.suffix}")
+
+        for item in data:
+            sample = {"raw_data": item}
+
+            # Get prompt
+            if self.fixed_prompt:
+                sample["prompt"] = self.fixed_prompt
+            else:
+                sample["prompt"] = item.get("prompt", item.get("caption", ""))
+
+            # Get edit image paths (input images for editing)
+            sample["edit_image_paths"] = []
+            for key in self.edit_image_keys:
+                if key in item and item[key]:
+                    path = self._resolve_path(item[key])
+                    if path.exists():
+                        sample["edit_image_paths"].append(str(path))
+
+            # Get label/target image path
+            if self.label_image_key and self.label_image_key in item:
+                path = self._resolve_path(item[self.label_image_key])
+                if path.exists():
+                    sample["label_image_path"] = str(path)
+                else:
+                    sample["label_image_path"] = None
+            else:
+                sample["label_image_path"] = None
+
+            self.samples.append(sample)
+
+    def _resolve_path(self, path_str: str) -> Path:
+        """Resolve path relative to base_path if not absolute."""
+        path = Path(path_str)
+        if path.is_absolute():
+            return path
+        return self.base_path / path
+
+    def _load_from_directory(self, max_count: int):
+        """Load data from directory structure (fallback)."""
         # Option 1: images/ and prompts/ directories
-        images_dir = data_path / "images"
-        prompts_dir = data_path / "prompts"
+        images_dir = self.base_path / "images"
+        prompts_dir = self.base_path / "prompts"
 
         if images_dir.exists() and prompts_dir.exists():
-            # Match images with prompts by filename
             for img_file in sorted(images_dir.glob("*")):
                 if img_file.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]:
-                    # Look for matching prompt file
                     prompt_file = prompts_dir / f"{img_file.stem}.txt"
                     if prompt_file.exists():
                         with open(prompt_file, "r") as f:
                             prompt = f.read().strip()
                         self.samples.append({
-                            "image_path": str(img_file),
-                            "prompt": prompt,
+                            "edit_image_paths": [str(img_file)],
+                            "label_image_path": None,
+                            "prompt": self.fixed_prompt or prompt,
                         })
                         if len(self.samples) >= max_count:
                             break
+            return
 
-        # Option 2: metadata.json file
-        elif (data_path / "metadata.json").exists():
-            with open(data_path / "metadata.json", "r") as f:
-                metadata = json.load(f)
-            for item in metadata[:max_count]:
-                image_path = data_path / item.get("image", item.get("source_image", ""))
-                if image_path.exists():
-                    self.samples.append({
-                        "image_path": str(image_path),
-                        "prompt": item.get("prompt", item.get("edit_prompt", "")),
-                    })
-
-        # Option 3: Just prompts (for text-to-image without source)
-        elif (data_path / "prompts.txt").exists():
-            with open(data_path / "prompts.txt", "r") as f:
+        # Option 2: Just prompts (for text-to-image without source)
+        if (self.base_path / "prompts.txt").exists():
+            with open(self.base_path / "prompts.txt", "r") as f:
                 prompts = [line.strip() for line in f if line.strip()]
             for prompt in prompts[:max_count]:
                 self.samples.append({
-                    "image_path": None,
-                    "prompt": prompt,
+                    "edit_image_paths": [],
+                    "label_image_path": None,
+                    "prompt": self.fixed_prompt or prompt,
                 })
+            return
 
-        # Option 4: Folder of text files (like TextFolderDataset)
-        else:
-            for file in sorted(os.listdir(data_path)):
-                if file.endswith(".txt"):
-                    with open(data_path / file, "r") as f:
-                        prompt = f.read().strip()
-                    self.samples.append({
-                        "image_path": None,
-                        "prompt": prompt,
-                    })
-                    if len(self.samples) >= max_count:
-                        break
+        # Option 3: Folder of text files
+        for file in sorted(os.listdir(self.base_path)):
+            if file.endswith(".txt"):
+                with open(self.base_path / file, "r") as f:
+                    prompt = f.read().strip()
+                self.samples.append({
+                    "edit_image_paths": [],
+                    "label_image_path": None,
+                    "prompt": self.fixed_prompt or prompt,
+                })
+                if len(self.samples) >= max_count:
+                    break
 
-        print(f"ImageEditDataset: loaded {len(self.samples)} samples")
+    def _load_and_process_image(self, image_path: str) -> torch.Tensor:
+        """Load an image and process it to tensor."""
+        image = Image.open(image_path).convert("RGB")
+        # Resize to target size
+        image = image.resize((self.width, self.height), Image.LANCZOS)
+        # Convert to tensor and normalize to [-1, 1]
+        image = TF.to_tensor(image)
+        image = image * 2.0 - 1.0
+        return image
 
     def __len__(self):
         return len(self.samples)
@@ -336,15 +429,28 @@ class ImageEditDataset(Dataset):
             "idx": idx,
         }
 
-        # Load source image if available
-        if sample["image_path"] is not None:
-            image = Image.open(sample["image_path"]).convert("RGB")
-            # Resize to target size
-            image = image.resize((self.width, self.height), Image.LANCZOS)
-            # Convert to tensor and normalize to [-1, 1]
-            image = TF.to_tensor(image)
-            image = image * 2.0 - 1.0  # Scale from [0,1] to [-1,1]
-            result["source_image"] = image
+        # Load edit images (input images for editing task)
+        edit_images = []
+        for path in sample.get("edit_image_paths", []):
+            if path and os.path.exists(path):
+                edit_images.append(self._load_and_process_image(path))
+
+        if edit_images:
+            # Stack edit images: [N, C, H, W] where N is number of edit images
+            result["edit_images"] = torch.stack(edit_images)
+        else:
+            result["edit_images"] = None
+
+        # Load label/target image (for supervised training)
+        label_path = sample.get("label_image_path")
+        if label_path and os.path.exists(label_path):
+            result["label_image"] = self._load_and_process_image(label_path)
+        else:
+            result["label_image"] = None
+
+        # For backward compatibility: source_image is first edit image
+        if edit_images:
+            result["source_image"] = edit_images[0]
         else:
             result["source_image"] = None
 

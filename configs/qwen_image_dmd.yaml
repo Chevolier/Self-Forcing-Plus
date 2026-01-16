@@ -1,10 +1,16 @@
 # Qwen-Image-Edit DMD Training Configuration
 # Uses LoRA for memory-efficient training with 8-step denoising
+# Compatible with DiffSynth-Studio data format
 
-# Model paths
-generator_name: /path/to/Qwen-Image-Edit-2509
-real_name: /path/to/Qwen-Image-Edit-2509
-fake_name: /path/to/Qwen-Image-Edit-2509
+# Model paths (from DiffSynth-Studio checkpoints)
+generator_name: /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/checkpoints/Qwen-Image-Edit-2509-step4000
+real_name: /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/checkpoints/Qwen-Image-Edit-2509-step4000
+fake_name: /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/checkpoints/Qwen-Image-Edit-2509-step4000
+
+# Alternative: use original model
+# generator_name: /home/ec2-user/SageMaker/efs/Models/Qwen-Image-Edit-2509
+# real_name: /home/ec2-user/SageMaker/efs/Models/Qwen-Image-Edit-2509
+# fake_name: /home/ec2-user/SageMaker/efs/Models/Qwen-Image-Edit-2509
 
 # Model type
 model_type: qwen_dmd
@@ -12,8 +18,9 @@ generator_type: bidirectional
 i2v: false
 
 # LoRA configuration
-lora_rank: 64
-lora_alpha: 64
+lora_rank: 32
+lora_alpha: 32
+lora_target_modules: "to_q,to_k,to_v,add_q_proj,add_k_proj,add_v_proj,to_out.0,to_add_out"
 
 # Scheduler
 scheduler_mu: 0.8
@@ -52,16 +59,23 @@ gradient_checkpointing: true
 seed: 0
 
 # Optimizer
-lr: 2.0e-05
-lr_critic: 4.0e-06
+lr: 1.0e-04
+lr_critic: 2.0e-05
 beta1: 0.9
 beta2: 0.999
 beta1_critic: 0.9
 beta2_critic: 0.999
+weight_decay: 0.0
 
-# Data
-data_type: image_edit
-data_path: data/image_edit/
+# Data configuration (DiffSynth-Studio compatible)
+data_path: /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/data
+metadata_path: /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/data/train_data.csv
+data_file_keys: "label_image,cloth_image,model_image"
+edit_image_keys: "cloth_image,model_image"
+label_image_key: "label_image"
+fixed_prompt: "让图2的模特换上图1的下装"
+data_max_count: 10000
+
 batch_size: 1
 total_batch_size: 32
 
@@ -76,9 +90,12 @@ width: 1024
 log_iters: 100
 ema_weight: 0.99
 ema_start_step: 200
+gc_interval: 50
+no_save: false
+no_visualize: true
 
 # Negative prompt for CFG
-negative_prompt: "blurry, low quality, distorted, ugly, bad anatomy, wrong proportions"
+negative_prompt: "blurry, low quality, distorted, ugly, bad anatomy, wrong proportions, watermark, text"
 
 # FSDP settings (for distributed training)
 generator_fsdp_wrap_strategy: size
@@ -88,6 +105,8 @@ text_encoder_fsdp_wrap_strategy: size
 text_encoder_cpu_offload: true
 sharding_strategy: full
 
-# Wandb (optional)
+# Wandb (optional - uncomment to enable)
+# wandb_host: "https://api.wandb.ai/"
+# wandb_key: "your-key"
 # wandb_entity: "your-entity"
 # wandb_project: "qwen-image-dmd"

@@ -138,13 +138,18 @@ class Trainer:
         if self.config.i2v:
             dataset = ShardingLMDBDataset(config.data_path, max_pair=int(1e8))
         elif self.is_qwen:
-            # Qwen image edit dataset
+            # Qwen image edit dataset with CSV support
             data_max_count = config.get("data_max_count", 100000)
             dataset = ImageEditDataset(
-                config.data_path,
+                data_path=config.data_path,
                 height=getattr(config, "height", 1024),
                 width=getattr(config, "width", 1024),
                 max_count=data_max_count,
+                metadata_path=getattr(config, "metadata_path", None),
+                data_file_keys=getattr(config, "data_file_keys", None),
+                edit_image_keys=getattr(config, "edit_image_keys", None),
+                label_image_key=getattr(config, "label_image_key", None),
+                fixed_prompt=getattr(config, "fixed_prompt", None),
             )
         else:
             if self.config.data_type == "text_folder":
