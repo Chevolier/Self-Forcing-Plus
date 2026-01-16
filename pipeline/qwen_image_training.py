@@ -1,6 +1,7 @@
 """
 Qwen-Image DMD Training Pipeline.
 Simplified from bidirectional_training.py for single image generation.
+Uses num_inference_steps parameter like DiffSynth-Studio.
 """
 
 import torch
@@ -10,8 +11,9 @@ from typing import Dict, Optional, List, Tuple
 
 class QwenImageTrainingPipeline:
     """
-    Training pipeline for Qwen-Image DMD with 8-step denoising.
+    Training pipeline for Qwen-Image DMD with N-step denoising.
     Similar to BidirectionalTrainingPipeline but for single images.
+    Uses scheduler.set_timesteps() like DiffSynth-Studio.
     """
 
     def __init__(
@@ -22,13 +24,8 @@ class QwenImageTrainingPipeline:
         self.config = config
         self.device = device
 
-        # 8-step denoising schedule
-        self.denoising_step_list = getattr(
-            config,
-            "denoising_step_list",
-            [1000, 875, 750, 625, 500, 375, 250, 125]
-        )
-        self.num_steps = len(self.denoising_step_list)
+        # Number of denoising steps (default 8)
+        self.num_inference_steps = getattr(config, "num_inference_steps", 8)
 
         # Training settings
         self.same_step_exit = getattr(config, "same_step_across_blocks", True)
@@ -63,32 +60,35 @@ class QwenImageTrainingPipeline:
         """
         batch_size = noise.shape[0]
 
+        # Set timesteps using scheduler (DiffSynth-Studio style)
+        generator.scheduler.set_timesteps(
+            num_inference_steps=self.num_inference_steps,
+            device=self.device,
+        )
+        timesteps = generator.scheduler.get_inference_timesteps()
+        num_steps = len(timesteps)
+
         # Initialize noisy input
         if edit_latent is not None:
             # For image editing: start from source + noise
-            # Use partial noising based on first timestep
-            first_sigma = generator.scheduler.get_sigma(
-                torch.tensor([self.denoising_step_list[0]], device=self.device)
-            ).item()
+            first_sigma = generator.scheduler.inference_sigmas[0].item()
             noisy_latent = (1 - first_sigma) * edit_latent + first_sigma * noise
         else:
             # For pure generation: start from noise
             noisy_latent = noise
 
         # Randomly sample exit step (synchronized across ranks)
-        if self.same_step_exit:
-            exit_step = self._sample_exit_step(batch_size)
-        else:
-            exit_step = self._sample_exit_step(batch_size)
+        exit_step = self._sample_exit_step(num_steps)
 
         # Denoising loop
         pred_latent = None
         exit_timestep = None
         next_timestep = None
 
-        for step_idx, timestep in enumerate(self.denoising_step_list):
+        for step_idx, timestep in enumerate(timesteps):
+            timestep_val = timestep.item() if isinstance(timestep, torch.Tensor) else timestep
             timestep_tensor = torch.full(
-                (batch_size,), timestep, device=self.device, dtype=torch.long
+                (batch_size,), timestep_val, device=self.device, dtype=torch.long
             )
 
             should_exit = (step_idx == exit_step)
@@ -105,12 +105,13 @@ class QwenImageTrainingPipeline:
                     )
 
                     # Add noise for next step
-                    if step_idx + 1 < len(self.denoising_step_list):
-                        next_t = self.denoising_step_list[step_idx + 1]
+                    if step_idx + 1 < num_steps:
+                        next_t = timesteps[step_idx + 1]
+                        next_t_val = next_t.item() if isinstance(next_t, torch.Tensor) else next_t
                         noisy_latent = generator.scheduler.add_noise(
                             denoised,
                             noise,
-                            torch.full((batch_size,), next_t, device=self.device),
+                            torch.full((batch_size,), next_t_val, device=self.device),
                         )
             else:
                 # Run WITH gradients at exit step
@@ -122,9 +123,10 @@ class QwenImageTrainingPipeline:
                     width=width,
                 )
 
-                exit_timestep = timestep
-                if step_idx + 1 < len(self.denoising_step_list):
-                    next_timestep = self.denoising_step_list[step_idx + 1]
+                exit_timestep = timestep_val
+                if step_idx + 1 < num_steps:
+                    next_t = timesteps[step_idx + 1]
+                    next_timestep = next_t.item() if isinstance(next_t, torch.Tensor) else next_t
                 else:
                     next_timestep = 0
 
@@ -139,24 +141,25 @@ class QwenImageTrainingPipeline:
 
         return pred_latent, gradient_mask, denoised_timestep_from, denoised_timestep_to
 
-    def _sample_exit_step(self, batch_size: int) -> int:
+    def _sample_exit_step(self, num_steps: int) -> int:
         """Sample random exit step, synchronized across distributed ranks."""
         if dist.is_initialized():
             # Generate on rank 0 and broadcast
             if dist.get_rank() == 0:
-                exit_step = torch.randint(0, self.num_steps, (1,), device=self.device)
+                exit_step = torch.randint(0, num_steps, (1,), device=self.device)
             else:
                 exit_step = torch.zeros(1, dtype=torch.long, device=self.device)
             dist.broadcast(exit_step, src=0)
             return exit_step.item()
         else:
-            return torch.randint(0, self.num_steps, (1,)).item()
+            return torch.randint(0, num_steps, (1,)).item()
 
 
 class QwenImageInferencePipeline:
     """
     Inference pipeline for Qwen-Image DMD.
     Runs the full denoising trajectory.
+    Uses scheduler.set_timesteps() like DiffSynth-Studio.
     """
 
     def __init__(
@@ -167,12 +170,8 @@ class QwenImageInferencePipeline:
         self.config = config
         self.device = device
 
-        # 8-step denoising schedule
-        self.denoising_step_list = getattr(
-            config,
-            "denoising_step_list",
-            [1000, 875, 750, 625, 500, 375, 250, 125]
-        )
+        # Number of denoising steps (default 8)
+        self.num_inference_steps = getattr(config, "num_inference_steps", 8)
 
     @torch.no_grad()
     def inference(
@@ -185,6 +184,7 @@ class QwenImageInferencePipeline:
         height: int = 1024,
         width: int = 1024,
         return_latents: bool = False,
+        num_inference_steps: int = None,
     ) -> torch.Tensor:
         """
         Run full denoising trajectory for inference.
@@ -198,25 +198,33 @@ class QwenImageInferencePipeline:
             height: image height
             width: image width
             return_latents: whether to return latents instead of pixels
+            num_inference_steps: override number of steps (optional)
 
         Returns:
             images: [B, C, H, W] generated images or latents
         """
         batch_size = noise.shape[0]
+        steps = num_inference_steps or self.num_inference_steps
+
+        # Set timesteps using scheduler
+        generator.scheduler.set_timesteps(
+            num_inference_steps=steps,
+            device=self.device,
+        )
+        timesteps = generator.scheduler.get_inference_timesteps()
 
         # Initialize
         if edit_latent is not None:
-            first_sigma = generator.scheduler.get_sigma(
-                torch.tensor([self.denoising_step_list[0]], device=self.device)
-            ).item()
+            first_sigma = generator.scheduler.inference_sigmas[0].item()
             noisy_latent = (1 - first_sigma) * edit_latent + first_sigma * noise
         else:
             noisy_latent = noise
 
         # Denoising loop
-        for step_idx, timestep in enumerate(self.denoising_step_list):
+        for step_idx, timestep in enumerate(timesteps):
+            timestep_val = timestep.item() if isinstance(timestep, torch.Tensor) else timestep
             timestep_tensor = torch.full(
-                (batch_size,), timestep, device=self.device, dtype=torch.long
+                (batch_size,), timestep_val, device=self.device, dtype=torch.long
             )
 
             _, denoised = generator(
@@ -228,12 +236,13 @@ class QwenImageInferencePipeline:
             )
 
             # Prepare for next step
-            if step_idx + 1 < len(self.denoising_step_list):
-                next_t = self.denoising_step_list[step_idx + 1]
+            if step_idx + 1 < len(timesteps):
+                next_t = timesteps[step_idx + 1]
+                next_t_val = next_t.item() if isinstance(next_t, torch.Tensor) else next_t
                 noisy_latent = generator.scheduler.add_noise(
                     denoised,
                     noise,
-                    torch.full((batch_size,), next_t, device=self.device),
+                    torch.full((batch_size,), next_t_val, device=self.device),
                 )
             else:
                 noisy_latent = denoised

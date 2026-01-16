@@ -25,16 +25,8 @@ lora_target_modules: "to_q,to_k,to_v,add_q_proj,add_k_proj,add_v_proj,to_out.0,t
 # Scheduler
 scheduler_mu: 0.8
 
-# 8-step denoising schedule
-denoising_step_list:
-- 1000
-- 875
-- 750
-- 625
-- 500
-- 375
-- 250
-- 125
+# Number of denoising steps (scheduler computes timesteps automatically)
+num_inference_steps: 8
 
 # Training hyperparameters
 num_train_timestep: 1000

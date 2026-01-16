@@ -26,6 +26,7 @@ class QwenFlowMatchScheduler:
     """
     Flow matching scheduler adapted for Qwen-Image models.
     Uses Qwen-specific sigma scheduling.
+    Compatible with DiffSynth-Studio's set_timesteps API.
     """
 
     def __init__(
@@ -38,21 +39,71 @@ class QwenFlowMatchScheduler:
         self.mu = mu
         self.shift_terminal = shift_terminal
 
-        # Pre-compute sigmas for training
-        sigmas = torch.linspace(1.0, 0.0, num_train_timesteps + 1)[:-1]
-        # Apply exponential shift
-        sigmas = math.exp(mu) / (math.exp(mu) + (1 / sigmas - 1))
-        # Apply terminal shift to prevent collapse
+        # Initialize with default 1000 steps for training
+        self._compute_sigmas_for_training()
+
+    def _compute_sigmas_for_training(self):
+        """Pre-compute sigmas for full training timesteps."""
+        sigmas = torch.linspace(1.0, 0.0, self.num_train_timesteps + 1)[:-1]
+        sigmas = math.exp(self.mu) / (math.exp(self.mu) + (1 / sigmas - 1))
         one_minus_z = 1 - sigmas
-        scale_factor = one_minus_z[-1] / (1 - shift_terminal)
+        scale_factor = one_minus_z[-1] / (1 - self.shift_terminal)
         sigmas = 1 - (one_minus_z / scale_factor)
 
         self.sigmas = sigmas
-        self.timesteps = sigmas * num_train_timesteps
+        self.timesteps = sigmas * self.num_train_timesteps
 
         # Compute alphas_cumprod for compatibility with loss functions
-        # For flow matching: alpha_t = 1 - sigma_t
         self.alphas_cumprod = (1 - self.sigmas) ** 2
+
+    def set_timesteps(
+        self,
+        num_inference_steps: int = 8,
+        denoising_strength: float = 1.0,
+        device: torch.device = None,
+    ):
+        """
+        Set timesteps for inference/training with specified number of steps.
+        Compatible with DiffSynth-Studio API.
+
+        Args:
+            num_inference_steps: Number of denoising steps (e.g., 8 for student)
+            denoising_strength: Strength of denoising (1.0 = full)
+            device: Device to place tensors on
+        """
+        sigma_min = 0.0
+        sigma_max = 1.0
+
+        # Compute sigmas for the specified number of steps
+        sigma_start = sigma_min + (sigma_max - sigma_min) * denoising_strength
+        sigmas = torch.linspace(sigma_start, sigma_min, num_inference_steps + 1)[:-1]
+
+        # Apply exponential shift (Qwen-specific)
+        sigmas = math.exp(self.mu) / (math.exp(self.mu) + (1 / sigmas - 1))
+
+        # Apply terminal shift to prevent collapse
+        one_minus_z = 1 - sigmas
+        scale_factor = one_minus_z[-1] / (1 - self.shift_terminal)
+        sigmas = 1 - (one_minus_z / scale_factor)
+
+        # Compute timesteps
+        timesteps = sigmas * self.num_train_timesteps
+
+        if device is not None:
+            sigmas = sigmas.to(device)
+            timesteps = timesteps.to(device)
+
+        self.inference_sigmas = sigmas
+        self.inference_timesteps = timesteps
+        self.num_inference_steps = num_inference_steps
+
+        return sigmas, timesteps
+
+    def get_inference_timesteps(self) -> torch.Tensor:
+        """Get the timesteps for inference after calling set_timesteps."""
+        if hasattr(self, 'inference_timesteps'):
+            return self.inference_timesteps
+        return self.timesteps
 
     def add_noise(
         self,

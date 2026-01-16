@@ -68,12 +68,8 @@ class QwenDMD(nn.Module):
         self.ts_schedule_max = getattr(args, "ts_schedule_max", False)
         self.min_score_timestep = getattr(args, "min_score_timestep", 0)
 
-        # Denoising step list for 8-step training
-        self.denoising_step_list = getattr(
-            args,
-            "denoising_step_list",
-            [1000, 875, 750, 625, 500, 375, 250, 125]
-        )
+        # Number of denoising steps (scheduler computes timesteps automatically)
+        self.num_inference_steps = getattr(args, "num_inference_steps", 8)
 
         # Denoising loss function
         self.denoising_loss_func = get_denoising_loss(
