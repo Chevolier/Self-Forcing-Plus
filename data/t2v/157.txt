@@ -1,0 +1,1 @@
+A synchronized diving pair gracefully executing a synchronized dive.

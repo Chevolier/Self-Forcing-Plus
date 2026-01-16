@@ -13,6 +13,13 @@ from wan.modules.clip import CLIPModel
 from wan.modules.causal_model import CausalWanModel
 
 
+def get_model_path(model_name: str) -> str:
+    """Get the model path, handling both relative names and absolute paths."""
+    if os.path.isabs(model_name):
+        return model_name
+    return f"wan_models/{model_name}"
+
+
 class WanTextEncoder(torch.nn.Module):
     def __init__(self, model_name="Wan2.1-T2V-14B") -> None:
         super().__init__()
@@ -24,13 +31,14 @@ class WanTextEncoder(torch.nn.Module):
             dtype=torch.float32,
             device=torch.device('cpu')
         ).eval().requires_grad_(False)
+        model_path = get_model_path(self.model_name)
         self.text_encoder.load_state_dict(
-            torch.load(f"wan_models/{self.model_name}/models_t5_umt5-xxl-enc-bf16.pth",
+            torch.load(f"{model_path}/models_t5_umt5-xxl-enc-bf16.pth",
                        map_location='cpu', weights_only=False)
         )
 
         self.tokenizer = HuggingfaceTokenizer(
-            name=f"wan_models/{self.model_name}/google/umt5-xxl/", seq_len=512, clean='whitespace')
+            name=f"{model_path}/google/umt5-xxl/", seq_len=512, clean='whitespace')
 
     @property
     def device(self):
@@ -57,11 +65,12 @@ class WanCLIPEncoder(torch.nn.Module):
     def __init__(self, model_name="Wan2.1-T2V-14B"):
         super().__init__()
         self.model_name = model_name
+        model_path = get_model_path(self.model_name)
         self.image_encoder = CLIPModel(
             dtype=torch.float16,
             device=torch.device('cpu'),
             checkpoint_path=os.path.join(
-                f"wan_models/{self.model_name}/",
+                model_path,
                 "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
             )
         )
@@ -94,8 +103,9 @@ class WanVAEWrapper(torch.nn.Module):
         self.std = torch.tensor(std, dtype=torch.float32)
 
         # init model
+        model_path = get_model_path(self.model_name)
         self.model = _video_vae(
-            pretrained_path=f"wan_models/{self.model_name}/Wan2.1_VAE.pth",
+            pretrained_path=f"{model_path}/Wan2.1_VAE.pth",
             z_dim=16,
         ).eval().requires_grad_(False)
 
@@ -200,12 +210,13 @@ class WanDiffusionWrapper(torch.nn.Module):
         super().__init__()
         self.model_name = model_name
         self.dim = 5120 if "14B" in model_name else 1536
+        model_path = get_model_path(model_name)
 
         if is_causal:
             self.model = CausalWanModel.from_pretrained(
-                f"wan_models/{model_name}/", local_attn_size=local_attn_size, sink_size=sink_size)
+                model_path, local_attn_size=local_attn_size, sink_size=sink_size)
         else:
-            self.model = WanModel.from_pretrained(f"wan_models/{model_name}/")
+            self.model = WanModel.from_pretrained(model_path)
         self.model.eval()
 
         # For non-causal diffusion, all frames share the same timestep
