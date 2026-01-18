@@ -1,6 +1,8 @@
 import gc
 import logging
 from tqdm import tqdm
+from safetensors.torch import save_file as safetensors_save_file
+from safetensors.torch import load_file as safetensors_load_file
 
 from utils.dataset import ShardingLMDBDataset, cycle
 from utils.dataset import TextDataset, TextFolderDataset, ImageEditDataset
@@ -238,46 +240,49 @@ class Trainer:
         if getattr(config, "resume_ckpt", False):
             print(f"Resuming training from {config.resume_ckpt}")
 
-            # Try new format first (model.pt with weights)
-            model_path = os.path.join(config.resume_ckpt, "model.pt")
-            if os.path.exists(model_path):
-                print(f"Loading checkpoint from {model_path}")
-                checkpoint = torch.load(model_path, map_location="cpu")
+            # Try safetensors format first (checkpoint.pt + *.safetensors)
+            checkpoint_meta_path = os.path.join(config.resume_ckpt, "checkpoint.pt")
+            generator_safetensors_path = os.path.join(config.resume_ckpt, "generator.safetensors")
 
-                # Check weights type
-                weights_type = checkpoint.get("weights_type", "lora")
+            if os.path.exists(checkpoint_meta_path) and os.path.exists(generator_safetensors_path):
+                print("Loading from safetensors format...")
+
+                # Load checkpoint metadata
+                checkpoint_meta = torch.load(checkpoint_meta_path, map_location="cpu")
+                weights_type = checkpoint_meta.get("weights_type", "lora")
                 print(f"Checkpoint weights type: {weights_type}")
 
                 # Load step
-                if "step" in checkpoint:
-                    self.step = checkpoint["step"]
+                if "step" in checkpoint_meta:
+                    self.step = checkpoint_meta["step"]
                     print(f"Resuming from step {self.step}")
                 elif getattr(config, "resume_step", False):
                     self.step = config.resume_step
                     print(f"Resuming from step {self.step} (from config)")
 
-                # Load generator weights (new format uses "generator" key)
-                gen_key = "generator" if "generator" in checkpoint else "generator_lora"
-                if gen_key in checkpoint:
-                    print(f"Loading generator weights ({len(checkpoint[gen_key])} params)")
-                    # Use strict=False for LoRA (partial state), strict=True for full weights
-                    strict = (weights_type == "full")
-                    self.model.generator.load_state_dict(checkpoint[gen_key], strict=strict)
-                    print("Generator weights loaded successfully")
+                # Use strict=False for LoRA (partial state), strict=True for full weights
+                strict = (weights_type == "full")
+
+                # Load generator weights
+                generator_weights = safetensors_load_file(generator_safetensors_path)
+                print(f"Loading generator weights ({len(generator_weights)} params)")
+                self.model.generator.load_state_dict(generator_weights, strict=strict)
+                print("Generator weights loaded successfully")
 
                 # Load critic weights
-                critic_key = "critic" if "critic" in checkpoint else "critic_lora"
-                if critic_key in checkpoint:
-                    print(f"Loading critic weights ({len(checkpoint[critic_key])} params)")
-                    strict = (weights_type == "full")
-                    self.model.fake_score.load_state_dict(checkpoint[critic_key], strict=strict)
+                critic_safetensors_path = os.path.join(config.resume_ckpt, "critic.safetensors")
+                if os.path.exists(critic_safetensors_path):
+                    critic_weights = safetensors_load_file(critic_safetensors_path)
+                    print(f"Loading critic weights ({len(critic_weights)} params)")
+                    self.model.fake_score.load_state_dict(critic_weights, strict=strict)
                     print("Critic weights loaded successfully")
 
                 # Load EMA weights if applicable
-                ema_key = "generator_ema" if "generator_ema" in checkpoint else "generator_ema_lora"
-                if ema_key in checkpoint and self.generator_ema is not None:
-                    print(f"Loading generator EMA weights ({len(checkpoint[ema_key])} params)")
-                    self.generator_ema.load_state_dict(checkpoint[ema_key])
+                ema_safetensors_path = os.path.join(config.resume_ckpt, "generator_ema.safetensors")
+                if os.path.exists(ema_safetensors_path) and self.generator_ema is not None:
+                    ema_weights = safetensors_load_file(ema_safetensors_path)
+                    print(f"Loading generator EMA weights ({len(ema_weights)} params)")
+                    self.generator_ema.load_state_dict(ema_weights)
                     print("Generator EMA weights loaded successfully")
 
                 # Load optimizer states if available
@@ -294,9 +299,56 @@ class Trainer:
                 else:
                     print(f"Info: Optimizer states not found at {optimizer_path}, starting fresh optimizers")
 
+            # Try old model.pt format
+            elif os.path.exists(os.path.join(config.resume_ckpt, "model.pt")):
+                model_path = os.path.join(config.resume_ckpt, "model.pt")
+                print(f"Loading from model.pt format: {model_path}")
+                checkpoint = torch.load(model_path, map_location="cpu")
+
+                weights_type = checkpoint.get("weights_type", "lora")
+                print(f"Checkpoint weights type: {weights_type}")
+
+                if "step" in checkpoint:
+                    self.step = checkpoint["step"]
+                    print(f"Resuming from step {self.step}")
+                elif getattr(config, "resume_step", False):
+                    self.step = config.resume_step
+                    print(f"Resuming from step {self.step} (from config)")
+
+                strict = (weights_type == "full")
+
+                gen_key = "generator" if "generator" in checkpoint else "generator_lora"
+                if gen_key in checkpoint:
+                    print(f"Loading generator weights ({len(checkpoint[gen_key])} params)")
+                    self.model.generator.load_state_dict(checkpoint[gen_key], strict=strict)
+                    print("Generator weights loaded successfully")
+
+                critic_key = "critic" if "critic" in checkpoint else "critic_lora"
+                if critic_key in checkpoint:
+                    print(f"Loading critic weights ({len(checkpoint[critic_key])} params)")
+                    self.model.fake_score.load_state_dict(checkpoint[critic_key], strict=strict)
+                    print("Critic weights loaded successfully")
+
+                ema_key = "generator_ema" if "generator_ema" in checkpoint else "generator_ema_lora"
+                if ema_key in checkpoint and self.generator_ema is not None:
+                    print(f"Loading generator EMA weights ({len(checkpoint[ema_key])} params)")
+                    self.generator_ema.load_state_dict(checkpoint[ema_key])
+                    print("Generator EMA weights loaded successfully")
+
+                optimizer_path = os.path.join(config.resume_ckpt, "optimizer.pt")
+                if os.path.exists(optimizer_path):
+                    print(f"Loading optimizer states from {optimizer_path}")
+                    optimizer_state = torch.load(optimizer_path, map_location="cpu")
+                    if "generator_optimizer" in optimizer_state:
+                        self.generator_optimizer.load_state_dict(optimizer_state["generator_optimizer"])
+                        print("Generator optimizer state loaded successfully")
+                    if "critic_optimizer" in optimizer_state:
+                        self.critic_optimizer.load_state_dict(optimizer_state["critic_optimizer"])
+                        print("Critic optimizer state loaded successfully")
+
             else:
-                # Fallback to old format (separate files)
-                print("New checkpoint format not found, trying legacy format...")
+                # Fallback to legacy format (separate files)
+                print("New checkpoint formats not found, trying legacy format...")
 
                 # Set resume step from config
                 if getattr(config, "resume_step", False):
@@ -353,6 +405,10 @@ class Trainer:
                 lora_state_dict[key] = value
         return lora_state_dict
 
+    def _prepare_state_dict_for_safetensors(self, state_dict):
+        """Convert state dict to be compatible with safetensors (contiguous tensors)."""
+        return {k: v.contiguous() for k, v in state_dict.items()}
+
     def save(self):
         print("Start gathering distributed model states...")
         generator_state_dict = fsdp_state_dict(self.model.generator)
@@ -374,29 +430,40 @@ class Trainer:
             print(f"Critic params: {len(critic_weights)}")
             weights_type = "full"
 
-        # Build checkpoint dict
-        checkpoint = {
-            "generator": generator_weights,
-            "critic": critic_weights,
-            "step": self.step,
-            "weights_type": weights_type,  # "lora" or "full"
-        }
-
-        # Add EMA state if applicable
+        # Get EMA weights if applicable
+        ema_weights = None
         if (self.ema_weight > 0.0) and (self.ema_start_step < self.step) and self.generator_ema is not None:
             ema_state_dict = self.generator_ema.state_dict()
             if self.use_lora:
-                checkpoint["generator_ema"] = self._extract_lora_state_dict(ema_state_dict)
+                ema_weights = self._extract_lora_state_dict(ema_state_dict)
             else:
-                checkpoint["generator_ema"] = ema_state_dict
+                ema_weights = ema_state_dict
 
         if self.is_main_process:
             ckpt_dir = os.path.join(self.checkpoint_dir, f"checkpoint_model_{self.step:06d}")
             os.makedirs(ckpt_dir, exist_ok=True)
 
-            # Save weights
-            torch.save(checkpoint, os.path.join(ckpt_dir, "model.pt"))
-            print(f"{weights_type.upper()} weights saved to {os.path.join(ckpt_dir, 'model.pt')}")
+            # Save weights as separate safetensors files
+            generator_path = os.path.join(ckpt_dir, "generator.safetensors")
+            safetensors_save_file(self._prepare_state_dict_for_safetensors(generator_weights), generator_path)
+            print(f"Generator {weights_type} weights saved to {generator_path}")
+
+            critic_path = os.path.join(ckpt_dir, "critic.safetensors")
+            safetensors_save_file(self._prepare_state_dict_for_safetensors(critic_weights), critic_path)
+            print(f"Critic {weights_type} weights saved to {critic_path}")
+
+            if ema_weights is not None:
+                ema_path = os.path.join(ckpt_dir, "generator_ema.safetensors")
+                safetensors_save_file(self._prepare_state_dict_for_safetensors(ema_weights), ema_path)
+                print(f"Generator EMA {weights_type} weights saved to {ema_path}")
+
+            # Save checkpoint metadata as .pt
+            checkpoint_meta = {
+                "step": self.step,
+                "weights_type": weights_type,
+            }
+            torch.save(checkpoint_meta, os.path.join(ckpt_dir, "checkpoint.pt"))
+            print(f"Checkpoint metadata saved to {os.path.join(ckpt_dir, 'checkpoint.pt')}")
 
             # Save optimizer states only if save_weights_only is False
             if not self.save_weights_only:
