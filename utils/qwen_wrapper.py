@@ -157,7 +157,7 @@ class QwenFlowMatchScheduler:
 class QwenTextEncoderWrapper(nn.Module):
     """Wrapper for Qwen2.5-VL text encoder."""
 
-    def __init__(self, model_name: str = "Qwen-Image-Edit-2509"):
+    def __init__(self, model_name: str = "Qwen-Image-Edit-2509", load_weights: bool = True):
         super().__init__()
         self.model_name = model_name
         model_path = get_model_path(model_name)
@@ -165,10 +165,11 @@ class QwenTextEncoderWrapper(nn.Module):
         # Initialize text encoder
         self.text_encoder = QwenImageTextEncoder()
 
-        # Load weights if available
-        text_encoder_path = os.path.join(model_path, "text_encoder")
-        if os.path.exists(text_encoder_path):
-            self._load_weights(text_encoder_path)
+        # Load weights only if requested (rank 0 loads, others get via FSDP sync)
+        if load_weights:
+            text_encoder_path = os.path.join(model_path, "text_encoder")
+            if os.path.exists(text_encoder_path):
+                self._load_weights(text_encoder_path)
 
         self.text_encoder.eval().requires_grad_(False)
 
@@ -188,19 +189,27 @@ class QwenTextEncoderWrapper(nn.Module):
 
     @property
     def device(self):
-        return next(self.text_encoder.parameters()).device
+        # Use torch.cuda.current_device() for FSDP compatibility
+        # FSDP shards parameters so next(parameters()).device may not work
+        if torch.cuda.is_available():
+            return torch.device(f"cuda:{torch.cuda.current_device()}")
+        return torch.device("cpu")
+
+    def _get_tokenizer(self):
+        """Get or create tokenizer (cached for efficiency)."""
+        if not hasattr(self, '_tokenizer'):
+            from transformers import Qwen2Tokenizer
+            model_path = get_model_path(self.model_name)
+            tokenizer_path = os.path.join(model_path, "tokenizer")
+            if os.path.exists(tokenizer_path):
+                self._tokenizer = Qwen2Tokenizer.from_pretrained(tokenizer_path)
+            else:
+                self._tokenizer = Qwen2Tokenizer.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
+        return self._tokenizer
 
     def forward(self, text_prompts: List[str]) -> Dict[str, torch.Tensor]:
         """Encode text prompts to embeddings."""
-        from transformers import Qwen2Tokenizer
-
-        # Get tokenizer
-        model_path = get_model_path(self.model_name)
-        tokenizer_path = os.path.join(model_path, "tokenizer")
-        if os.path.exists(tokenizer_path):
-            tokenizer = Qwen2Tokenizer.from_pretrained(tokenizer_path)
-        else:
-            tokenizer = Qwen2Tokenizer.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
+        tokenizer = self._get_tokenizer()
 
         # Tokenize
         inputs = tokenizer(
@@ -209,25 +218,36 @@ class QwenTextEncoderWrapper(nn.Module):
             truncation=True,
             max_length=512,
             return_tensors="pt",
-        ).to(self.device)
+        )
+
+        # Move to GPU explicitly using current device for FSDP compatibility
+        device = self.device
+        input_ids = inputs["input_ids"].to(device)
+        attention_mask = inputs["attention_mask"].to(device)
 
         # Forward pass
+        # QwenImageTextEncoder returns outputs.hidden_states which is a tuple
+        # The last element [-1] is the final hidden state
         with torch.no_grad():
-            outputs = self.text_encoder(
-                input_ids=inputs["input_ids"],
-                attention_mask=inputs["attention_mask"],
+            hidden_states = self.text_encoder(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
             )
 
+        # hidden_states is a tuple of all layer hidden states
+        # Use the last one as the prompt embedding
+        last_hidden_state = hidden_states[-1]
+
         return {
-            "prompt_embeds": outputs.last_hidden_state,
-            "attention_mask": inputs["attention_mask"],
+            "prompt_embeds": last_hidden_state,
+            "attention_mask": attention_mask,
         }
 
 
 class QwenVAEWrapper(nn.Module):
     """Wrapper for Qwen-Image VAE."""
 
-    def __init__(self, model_name: str = "Qwen-Image-Edit-2509"):
+    def __init__(self, model_name: str = "Qwen-Image-Edit-2509", load_weights: bool = True):
         super().__init__()
         self.model_name = model_name
         model_path = get_model_path(model_name)
@@ -240,13 +260,17 @@ class QwenVAEWrapper(nn.Module):
             num_res_blocks=2,
         )
 
-        # Load weights if available
-        vae_path = os.path.join(model_path, "vae")
-        if os.path.exists(vae_path):
-            self._load_weights(vae_path)
+        # Load weights only if requested (rank 0 loads, others get via FSDP sync)
+        if load_weights:
+            vae_path = os.path.join(model_path, "vae")
+            if os.path.exists(vae_path):
+                self._load_weights(vae_path)
 
-        self.model.eval().requires_grad_(False)
         self.dtype = torch.bfloat16
+        # Convert model to bfloat16 to match input dtype
+        self.model = self.model.to(self.dtype)
+        self.model.eval().requires_grad_(False)
+        self._current_device = None
 
     def _load_weights(self, path: str):
         """Load VAE weights."""
@@ -261,6 +285,12 @@ class QwenVAEWrapper(nn.Module):
             self.model.load_state_dict(state_dict, strict=False)
             print(f"Loaded VAE from {path}")
 
+    def _ensure_device(self, target_device: torch.device):
+        """Move model to target device if needed."""
+        if self._current_device != target_device:
+            self.model = self.model.to(target_device)
+            self._current_device = target_device
+
     def encode(self, pixel: torch.Tensor) -> torch.Tensor:
         """Encode pixel images to latent space.
 
@@ -270,6 +300,8 @@ class QwenVAEWrapper(nn.Module):
         Returns:
             latents: [B, 16, H/8, W/8] latent representations
         """
+        # Ensure VAE is on the same device as input
+        self._ensure_device(pixel.device)
         return self.model.encode(pixel.to(self.dtype))
 
     def decode(self, latents: torch.Tensor) -> torch.Tensor:
@@ -281,6 +313,8 @@ class QwenVAEWrapper(nn.Module):
         Returns:
             pixel: [B, C, H, W] pixel images in range [-1, 1]
         """
+        # Ensure VAE is on the same device as input
+        self._ensure_device(latents.device)
         return self.model.decode(latents.to(self.dtype))
 
     def encode_to_latent(self, pixel: torch.Tensor) -> torch.Tensor:
@@ -306,6 +340,7 @@ class QwenDiffusionWrapper(nn.Module):
         lora_alpha: int = 64,
         lora_target_modules: List[str] = None,
         enable_lora: bool = False,
+        load_weights: bool = True,  # Set False on non-rank-0 for FSDP sync
     ):
         super().__init__()
         self.model_name = model_name
@@ -315,10 +350,11 @@ class QwenDiffusionWrapper(nn.Module):
         # Initialize DiT model
         self.model = QwenImageDiT(num_layers=60)
 
-        # Load weights if available
-        dit_path = os.path.join(model_path, "transformer")
-        if os.path.exists(dit_path):
-            self._load_weights(dit_path)
+        # Load weights only if requested (rank 0 loads, others get via FSDP sync)
+        if load_weights:
+            dit_path = os.path.join(model_path, "transformer")
+            if os.path.exists(dit_path):
+                self._load_weights(dit_path)
 
         self.model.eval()
 

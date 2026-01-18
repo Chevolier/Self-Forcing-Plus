@@ -28,7 +28,8 @@ lora_target_modules: "to_q,to_k,to_v,add_q_proj,add_k_proj,add_v_proj,to_out.0,t
 scheduler_mu: 0.8
 
 # Number of denoising steps (scheduler computes timesteps automatically)
-num_inference_steps: 8
+# Reduced from 8 to 4 for better memory efficiency during training
+num_inference_steps: 4
 
 # Training hyperparameters
 num_train_timestep: 1000
@@ -76,9 +77,10 @@ total_batch_size: 32
 # Update ratio: train critic more frequently than generator
 dfake_gen_update_ratio: 5
 
-# Image dimensions
-height: 1785
-width: 1340
+# Image dimensions (reduce for memory - original was 1785x1340)
+# Start with 512x512 to verify training works, then increase
+height: 512
+width: 512
 
 # Logging
 log_iters: 100
@@ -101,6 +103,7 @@ real_score_fsdp_wrap_strategy: qwen
 fake_score_fsdp_wrap_strategy: qwen
 text_encoder_fsdp_wrap_strategy: size  # Text encoder uses size-based wrapping
 text_encoder_cpu_offload: true
+real_score_cpu_offload: true  # Offload frozen teacher model to CPU to save GPU memory
 sharding_strategy: full
 # Sharding strategies: "full", "hybrid_full", "hybrid_zero2", "no_shard"
 

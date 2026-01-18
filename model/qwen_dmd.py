@@ -30,11 +30,12 @@ class QwenDMD(nn.Module):
     For single image generation/editing with 8-step denoising.
     """
 
-    def __init__(self, args, device):
+    def __init__(self, args, device, fsdp_wrapper=None):
         super().__init__()
         self.args = args
         self.device = device
         self.dtype = torch.bfloat16 if getattr(args, "mixed_precision", True) else torch.float32
+        self.fsdp_wrapper = fsdp_wrapper  # Optional FSDP wrapper for immediate wrapping
 
         # Model names
         self.generator_name = getattr(args, "generator_name", "Qwen-Image-Edit-2509")
@@ -87,15 +88,43 @@ class QwenDMD(nn.Module):
         self.width = getattr(args, "width", 1024)
 
     def _initialize_models(self, args, device):
-        """Initialize generator, real_score, fake_score, text_encoder, and VAE."""
+        """Initialize generator, real_score, fake_score, text_encoder, and VAE.
+
+        Only rank 0 loads weights from disk. Other ranks initialize empty models
+        and receive weights via FSDP sync_module_states=True.
+        """
+        import gc
         mu = getattr(args, "scheduler_mu", 0.8)
+
+        # Check if we're rank 0 - only rank 0 loads weights to save CPU RAM
+        is_rank_zero = True
+        is_distributed = dist.is_initialized()
+        if is_distributed:
+            is_rank_zero = dist.get_rank() == 0
+
+        if is_rank_zero:
+            print("Rank 0: Loading model weights from disk...", flush=True)
+        else:
+            print(f"Rank {dist.get_rank()}: Initializing empty models (weights via FSDP sync)...", flush=True)
 
         # Parse LoRA target modules from config (comma-separated string or list)
         lora_target_modules = getattr(args, "lora_target_modules", None)
         if isinstance(lora_target_modules, str):
             lora_target_modules = [m.strip() for m in lora_target_modules.split(",")]
 
+        # Helper to optionally apply FSDP wrapping immediately after model creation
+        def maybe_fsdp_wrap(model, wrap_key, cpu_offload=False):
+            if self.fsdp_wrapper is not None:
+                wrapped = self.fsdp_wrapper(model, wrap_key, cpu_offload=cpu_offload)
+                gc.collect()
+                torch.cuda.empty_cache()
+                return wrapped
+            return model
+
         # Generator with LoRA (trainable)
+        # Add barrier so other ranks wait for rank 0 to finish loading
+        if is_rank_zero:
+            print("  [1/3] Loading generator...", flush=True)
         self.generator = QwenDiffusionWrapper(
             model_name=self.generator_name,
             mu=mu,
@@ -103,19 +132,42 @@ class QwenDMD(nn.Module):
             lora_alpha=self.lora_alpha,
             lora_target_modules=lora_target_modules,
             enable_lora=True,
+            load_weights=is_rank_zero,
         )
         # Only LoRA parameters are trainable
         self._freeze_base_enable_lora(self.generator)
+        gc.collect()
+        torch.cuda.empty_cache()
+        if is_rank_zero:
+            print("  [1/3] Generator loaded, wrapping with FSDP...", flush=True)
+        self.generator = maybe_fsdp_wrap(self.generator, "generator")
+        if is_distributed:
+            dist.barrier()  # Sync after generator init
 
         # Real score (frozen, no LoRA)
+        if is_rank_zero:
+            print("  [2/3] Loading real_score...", flush=True)
         self.real_score = QwenDiffusionWrapper(
             model_name=self.real_model_name,
             mu=mu,
             enable_lora=False,
+            load_weights=is_rank_zero,
         )
         self.real_score.requires_grad_(False)
+        gc.collect()
+        torch.cuda.empty_cache()
+        if is_rank_zero:
+            print("  [2/3] Real_score loaded, wrapping with FSDP...", flush=True)
+        self.real_score = maybe_fsdp_wrap(
+            self.real_score, "real_score",
+            cpu_offload=getattr(args, "real_score_cpu_offload", False)
+        )
+        if is_distributed:
+            dist.barrier()  # Sync after real_score init
 
         # Fake score with LoRA (trainable)
+        if is_rank_zero:
+            print("  [3/3] Loading fake_score...", flush=True)
         self.fake_score = QwenDiffusionWrapper(
             model_name=self.fake_model_name,
             mu=mu,
@@ -123,15 +175,37 @@ class QwenDMD(nn.Module):
             lora_alpha=self.lora_alpha,
             lora_target_modules=lora_target_modules,
             enable_lora=True,
+            load_weights=is_rank_zero,
         )
         self._freeze_base_enable_lora(self.fake_score)
+        gc.collect()
+        torch.cuda.empty_cache()
+        if is_rank_zero:
+            print("  [3/3] Fake_score loaded, wrapping with FSDP...", flush=True)
+        self.fake_score = maybe_fsdp_wrap(self.fake_score, "fake_score")
+        if is_distributed:
+            dist.barrier()  # Sync after fake_score init
 
         # Text encoder (frozen)
-        self.text_encoder = QwenTextEncoderWrapper(model_name=self.generator_name)
+        if is_rank_zero:
+            print("  Loading text_encoder...", flush=True)
+        self.text_encoder = QwenTextEncoderWrapper(
+            model_name=self.generator_name,
+            load_weights=is_rank_zero,
+        )
         self.text_encoder.requires_grad_(False)
+        self.text_encoder = maybe_fsdp_wrap(
+            self.text_encoder, "text_encoder",
+            cpu_offload=getattr(args, "text_encoder_cpu_offload", False)
+        )
 
         # VAE (frozen)
-        self.vae = QwenVAEWrapper(model_name=self.generator_name)
+        if is_rank_zero:
+            print("  Loading VAE...", flush=True)
+        self.vae = QwenVAEWrapper(
+            model_name=self.generator_name,
+            load_weights=is_rank_zero,
+        )
         self.vae.requires_grad_(False)
 
         # Get scheduler from generator
@@ -141,6 +215,12 @@ class QwenDMD(nn.Module):
         if getattr(args, "gradient_checkpointing", False):
             self.generator.enable_gradient_checkpointing()
             self.fake_score.enable_gradient_checkpointing()
+
+        if is_distributed:
+            dist.barrier()  # Final sync before returning
+
+        if is_rank_zero:
+            print("Rank 0: Model initialization complete.")
 
     def _freeze_base_enable_lora(self, model: QwenDiffusionWrapper):
         """Freeze base model parameters and enable LoRA parameters."""

@@ -680,6 +680,6 @@ class QwenImageDiT(torch.nn.Module):
         
         image = self.norm_out(image, conditioning)
         image = self.proj_out(image)
-        
+
         latents = rearrange(image, "B (H W) (C P Q) -> B C (H P) (W Q)", H=height//16, W=width//16, P=2, Q=2)
-        return image
+        return latents

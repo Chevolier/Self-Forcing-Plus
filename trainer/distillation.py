@@ -66,41 +66,79 @@ class Trainer:
         elif config.distribution_loss == "sid":
             self.model = SiD(config, device=self.device)
         elif config.distribution_loss == "qwen_dmd":
-            self.model = QwenDMD(config, device=self.device)
+            # Create FSDP wrapper function for immediate wrapping during model init
+            # This allows each model to be FSDP-wrapped right after creation,
+            # freeing CPU memory before the next model is loaded
+            def qwen_fsdp_wrapper(model, wrap_key, cpu_offload=False):
+                wrap_strategy_map = {
+                    "generator": config.generator_fsdp_wrap_strategy,
+                    "real_score": config.real_score_fsdp_wrap_strategy,
+                    "fake_score": config.fake_score_fsdp_wrap_strategy,
+                    "text_encoder": config.text_encoder_fsdp_wrap_strategy,
+                }
+                wrap_strategy = wrap_strategy_map.get(wrap_key, "size")
+                if self.is_main_process:
+                    print(f"    FSDP wrapping {wrap_key} (strategy={wrap_strategy}, cpu_offload={cpu_offload})...", flush=True)
+                return fsdp_wrap(
+                    model,
+                    sharding_strategy=config.sharding_strategy,
+                    mixed_precision=config.mixed_precision,
+                    wrap_strategy=wrap_strategy,
+                    cpu_offload=cpu_offload
+                )
+
+            self.model = QwenDMD(config, device=self.device, fsdp_wrapper=qwen_fsdp_wrapper)
         else:
             raise ValueError("Invalid distribution matching loss")
 
-        # Save pretrained model state_dicts to CPU
-        self.fake_score_state_dict_cpu = self.model.fake_score.state_dict()
+        # Save pretrained model state_dicts to CPU (after FSDP wrapping for Qwen)
+        if not self.is_qwen:
+            self.fake_score_state_dict_cpu = self.model.fake_score.state_dict()
 
-        self.model.generator = fsdp_wrap(
-            self.model.generator,
-            sharding_strategy=config.sharding_strategy,
-            mixed_precision=config.mixed_precision,
-            wrap_strategy=config.generator_fsdp_wrap_strategy
-        )
+            # FSDP wrapping with memory cleanup between models to prevent OOM
+            self.model.generator = fsdp_wrap(
+                self.model.generator,
+                sharding_strategy=config.sharding_strategy,
+                mixed_precision=config.mixed_precision,
+                wrap_strategy=config.generator_fsdp_wrap_strategy
+            )
+            gc.collect()
+            torch.cuda.empty_cache()
 
-        self.model.real_score = fsdp_wrap(
-            self.model.real_score,
-            sharding_strategy=config.sharding_strategy,
-            mixed_precision=config.mixed_precision,
-            wrap_strategy=config.real_score_fsdp_wrap_strategy
-        )
+            self.model.real_score = fsdp_wrap(
+                self.model.real_score,
+                sharding_strategy=config.sharding_strategy,
+                mixed_precision=config.mixed_precision,
+                wrap_strategy=config.real_score_fsdp_wrap_strategy,
+                cpu_offload=getattr(config, "real_score_cpu_offload", False)
+            )
+            gc.collect()
+            torch.cuda.empty_cache()
 
-        self.model.fake_score = fsdp_wrap(
-            self.model.fake_score,
-            sharding_strategy=config.sharding_strategy,
-            mixed_precision=config.mixed_precision,
-            wrap_strategy=config.fake_score_fsdp_wrap_strategy
-        )
+            self.model.fake_score = fsdp_wrap(
+                self.model.fake_score,
+                sharding_strategy=config.sharding_strategy,
+                mixed_precision=config.mixed_precision,
+                wrap_strategy=config.fake_score_fsdp_wrap_strategy
+            )
+            gc.collect()
+            torch.cuda.empty_cache()
 
-        self.model.text_encoder = fsdp_wrap(
-            self.model.text_encoder,
-            sharding_strategy=config.sharding_strategy,
-            mixed_precision=config.mixed_precision,
-            wrap_strategy=config.text_encoder_fsdp_wrap_strategy,
-            cpu_offload=getattr(config, "text_encoder_cpu_offload", False)
-        )
+            self.model.text_encoder = fsdp_wrap(
+                self.model.text_encoder,
+                sharding_strategy=config.sharding_strategy,
+                mixed_precision=config.mixed_precision,
+                wrap_strategy=config.text_encoder_fsdp_wrap_strategy,
+                cpu_offload=getattr(config, "text_encoder_cpu_offload", False)
+            )
+            gc.collect()
+            torch.cuda.empty_cache()
+        else:
+            # For Qwen, FSDP wrapping already done in QwenDMD init
+            # Get state dict from FSDP-wrapped model
+            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+            with FSDP.state_dict_type(self.model.fake_score, torch.distributed.fsdp.StateDictType.FULL_STATE_DICT):
+                self.fake_score_state_dict_cpu = self.model.fake_score.state_dict()
 
         if self.config.i2v:
             self.model.image_encoder = fsdp_wrap(
@@ -114,7 +152,7 @@ class Trainer:
             self.model.vae = self.model.vae.to(
                 device=self.device, dtype=torch.bfloat16)
 
-        elif not config.no_visualize or config.load_raw_video:
+        elif not getattr(config, "no_visualize", True) or getattr(config, "load_raw_video", False):
             self.model.vae = self.model.vae.to(
                 device=self.device, dtype=torch.bfloat16 if config.mixed_precision else torch.float32)
 

@@ -152,7 +152,7 @@ def fsdp_wrap(module, sharding_strategy="full", mixed_precision=False, wrap_stra
         use_orig_params=True,
         ignored_modules=ignored_modules,
         cpu_offload=CPUOffload(offload_params=cpu_offload),
-        sync_module_states=False  # Load ckpt on rank 0 and sync to other ranks
+        sync_module_states=True  # Broadcast weights from rank 0 to all other ranks
     )
     return module
 
