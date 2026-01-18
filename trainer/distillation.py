@@ -1,5 +1,6 @@
 import gc
 import logging
+from tqdm import tqdm
 
 from utils.dataset import ShardingLMDBDataset, cycle
 from utils.dataset import TextDataset, TextFolderDataset, ImageEditDataset
@@ -339,6 +340,8 @@ class Trainer:
         self.max_grad_norm_critic = getattr(config, "max_grad_norm_critic", 10.0)
         self.save_weights_only = getattr(config, "save_weights_only", True)
         self.use_lora = getattr(config, "lora_rank", 0) > 0
+        self.log_every_n_steps = getattr(config, "log_every_n_steps", 10)
+        self.total_steps = getattr(config, "total_steps", 100000)
         self.previous_time = None
 
     def _extract_lora_state_dict(self, full_state_dict):
@@ -595,9 +598,17 @@ class Trainer:
     def train(self):
         start_step = self.step
 
-        while True:
-            if self.is_main_process:
-                print(f"training step {self.step} ...")
+        # Create progress bar (only on main process)
+        pbar = None
+        if self.is_main_process:
+            pbar = tqdm(
+                initial=self.step,
+                total=self.total_steps,
+                desc="Training",
+                dynamic_ncols=True
+            )
+
+        while self.step < self.total_steps:
             TRAIN_GENERATOR = self.step % self.config.dfake_gen_update_ratio == 0
 
             # Train the generator
@@ -639,20 +650,42 @@ class Trainer:
             if self.is_main_process:
                 wandb_loss_dict = {}
                 if TRAIN_GENERATOR:
-                    wandb_loss_dict.update(
-                        {
-                            "generator_loss": generator_log_dict["generator_loss"].mean().item(),
-                            "generator_grad_norm": generator_log_dict["generator_grad_norm"].mean().item(),
-                            "dmdtrain_gradient_norm": generator_log_dict["dmdtrain_gradient_norm"].mean().item()
-                        }
-                    )
+                    gen_loss = generator_log_dict["generator_loss"].mean().item()
+                    gen_grad_norm = generator_log_dict["generator_grad_norm"].mean().item()
+                    dmd_grad_norm = generator_log_dict["dmdtrain_gradient_norm"].mean().item()
+                    wandb_loss_dict.update({
+                        "generator_loss": gen_loss,
+                        "generator_grad_norm": gen_grad_norm,
+                        "dmdtrain_gradient_norm": dmd_grad_norm
+                    })
 
-                wandb_loss_dict.update(
-                    {
-                        "critic_loss": critic_log_dict["critic_loss"].mean().item(),
-                        "critic_grad_norm": critic_log_dict["critic_grad_norm"].mean().item()
-                    }
-                )
+                critic_loss = critic_log_dict["critic_loss"].mean().item()
+                critic_grad_norm = critic_log_dict["critic_grad_norm"].mean().item()
+                wandb_loss_dict.update({
+                    "critic_loss": critic_loss,
+                    "critic_grad_norm": critic_grad_norm
+                })
+
+                # Update progress bar
+                if pbar is not None:
+                    pbar.update(1)
+                    if TRAIN_GENERATOR:
+                        pbar.set_postfix({
+                            "g_loss": f"{gen_loss:.4f}",
+                            "c_loss": f"{critic_loss:.4f}"
+                        })
+                    else:
+                        pbar.set_postfix({"c_loss": f"{critic_loss:.4f}"})
+
+                # Print losses every n steps
+                if self.step % self.log_every_n_steps == 0:
+                    if TRAIN_GENERATOR:
+                        print(f"\n[Step {self.step}] Generator Loss: {gen_loss:.4f}, "
+                              f"Critic Loss: {critic_loss:.4f}, "
+                              f"Gen Grad: {gen_grad_norm:.4f}, Critic Grad: {critic_grad_norm:.4f}")
+                    else:
+                        print(f"\n[Step {self.step}] Critic Loss: {critic_loss:.4f}, "
+                              f"Critic Grad: {critic_grad_norm:.4f}")
 
                 if not self.disable_wandb:
                     wandb.log(wandb_loss_dict, step=self.step)
@@ -671,3 +704,9 @@ class Trainer:
                     if not self.disable_wandb:
                         wandb.log({"per iteration time": current_time - self.previous_time}, step=self.step)
                     self.previous_time = current_time
+
+        # Close progress bar
+        if pbar is not None:
+            pbar.close()
+
+        print(f"Training completed at step {self.step}")
