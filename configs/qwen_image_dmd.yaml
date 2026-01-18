@@ -116,7 +116,7 @@ wandb_save_dir: "./wandb"
 disable_wandb: false  # Set to false and fill in key/entity to enable
 
 # resume_ckpt: logs/qwen_image_dmd/checkpoint_model_000200
-# save_weights_only: false  # to also save optimizer for next checkpoint
+save_weights_only: false  # to also save optimizer for next checkpoint
 checkpoint_dir: checkpoints/
 
 log_every_n_steps: 10    # print detailed losses every n steps (default: 10)
