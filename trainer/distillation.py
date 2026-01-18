@@ -285,17 +285,12 @@ class Trainer:
                     self.generator_ema.load_state_dict(ema_weights)
                     print("Generator EMA weights loaded successfully")
 
-                # Load optimizer states if available
+                # Load optimizer states if available (using FSDP-aware loading)
                 optimizer_path = os.path.join(config.resume_ckpt, "optimizer.pt")
                 if os.path.exists(optimizer_path):
                     print(f"Loading optimizer states from {optimizer_path}")
                     optimizer_state = torch.load(optimizer_path, map_location="cpu")
-                    if "generator_optimizer" in optimizer_state:
-                        self.generator_optimizer.load_state_dict(optimizer_state["generator_optimizer"])
-                        print("Generator optimizer state loaded successfully")
-                    if "critic_optimizer" in optimizer_state:
-                        self.critic_optimizer.load_state_dict(optimizer_state["critic_optimizer"])
-                        print("Critic optimizer state loaded successfully")
+                    self._load_fsdp_optimizer_state(optimizer_state)
                 else:
                     print(f"Info: Optimizer states not found at {optimizer_path}, starting fresh optimizers")
 
@@ -339,12 +334,7 @@ class Trainer:
                 if os.path.exists(optimizer_path):
                     print(f"Loading optimizer states from {optimizer_path}")
                     optimizer_state = torch.load(optimizer_path, map_location="cpu")
-                    if "generator_optimizer" in optimizer_state:
-                        self.generator_optimizer.load_state_dict(optimizer_state["generator_optimizer"])
-                        print("Generator optimizer state loaded successfully")
-                    if "critic_optimizer" in optimizer_state:
-                        self.critic_optimizer.load_state_dict(optimizer_state["critic_optimizer"])
-                        print("Critic optimizer state loaded successfully")
+                    self._load_fsdp_optimizer_state(optimizer_state)
 
             else:
                 # Fallback to legacy format (separate files)
@@ -404,6 +394,40 @@ class Trainer:
             if "lora_" in key.lower():
                 lora_state_dict[key] = value
         return lora_state_dict
+
+    def _load_fsdp_optimizer_state(self, optimizer_state):
+        """Load optimizer states using FSDP-aware loading."""
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, FullOptimStateDictConfig, StateDictType
+
+        full_optim_config = FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=True)
+
+        if "generator_optimizer" in optimizer_state:
+            with FSDP.state_dict_type(
+                self.model.generator,
+                StateDictType.FULL_STATE_DICT,
+                optim_state_dict_config=full_optim_config
+            ):
+                optim_state_to_load = FSDP.optim_state_dict_to_load(
+                    self.model.generator,
+                    self.generator_optimizer,
+                    optimizer_state["generator_optimizer"]
+                )
+                self.generator_optimizer.load_state_dict(optim_state_to_load)
+            print("Generator optimizer state loaded successfully")
+
+        if "critic_optimizer" in optimizer_state:
+            with FSDP.state_dict_type(
+                self.model.fake_score,
+                StateDictType.FULL_STATE_DICT,
+                optim_state_dict_config=full_optim_config
+            ):
+                optim_state_to_load = FSDP.optim_state_dict_to_load(
+                    self.model.fake_score,
+                    self.critic_optimizer,
+                    optimizer_state["critic_optimizer"]
+                )
+                self.critic_optimizer.load_state_dict(optim_state_to_load)
+            print("Critic optimizer state loaded successfully")
 
     def _prepare_state_dict_for_safetensors(self, state_dict):
         """Convert state dict to be compatible with safetensors (contiguous tensors)."""
@@ -465,11 +489,32 @@ class Trainer:
             torch.save(checkpoint_meta, os.path.join(ckpt_dir, "checkpoint.pt"))
             print(f"Checkpoint metadata saved to {os.path.join(ckpt_dir, 'checkpoint.pt')}")
 
-            # Save optimizer states only if save_weights_only is False
-            if not self.save_weights_only:
+        # Save optimizer states only if save_weights_only is False
+        # Must be done outside is_main_process because FSDP needs all ranks to participate
+        if not self.save_weights_only:
+            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, FullOptimStateDictConfig, StateDictType
+
+            # Use FSDP's optim_state_dict to properly gather sharded optimizer states
+            full_optim_config = FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=True)
+
+            with FSDP.state_dict_type(
+                self.model.generator,
+                StateDictType.FULL_STATE_DICT,
+                optim_state_dict_config=full_optim_config
+            ):
+                generator_optim_state = FSDP.optim_state_dict(self.model.generator, self.generator_optimizer)
+
+            with FSDP.state_dict_type(
+                self.model.fake_score,
+                StateDictType.FULL_STATE_DICT,
+                optim_state_dict_config=full_optim_config
+            ):
+                critic_optim_state = FSDP.optim_state_dict(self.model.fake_score, self.critic_optimizer)
+
+            if self.is_main_process:
                 optimizer_state = {
-                    "generator_optimizer": self.generator_optimizer.state_dict(),
-                    "critic_optimizer": self.critic_optimizer.state_dict(),
+                    "generator_optimizer": generator_optim_state,
+                    "critic_optimizer": critic_optim_state,
                 }
                 torch.save(optimizer_state, os.path.join(ckpt_dir, "optimizer.pt"))
                 print(f"Optimizer states saved to {os.path.join(ckpt_dir, 'optimizer.pt')}")
