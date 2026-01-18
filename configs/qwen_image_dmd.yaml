@@ -121,3 +121,4 @@ checkpoint_dir: checkpoints/
 
 log_every_n_steps: 10    # print detailed losses every n steps (default: 10)
 total_steps: 1000
+resume_ckpt: checkpoints/checkpoint_000200
