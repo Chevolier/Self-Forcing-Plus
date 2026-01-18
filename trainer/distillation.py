@@ -440,7 +440,7 @@ class Trainer:
                 ema_weights = ema_state_dict
 
         if self.is_main_process:
-            ckpt_dir = os.path.join(self.checkpoint_dir, f"checkpoint_model_{self.step:06d}")
+            ckpt_dir = os.path.join(self.checkpoint_dir, f"checkpoint_{self.step:06d}")
             os.makedirs(ckpt_dir, exist_ok=True)
 
             # Save weights as separate safetensors files
