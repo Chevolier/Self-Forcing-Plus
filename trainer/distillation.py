@@ -236,11 +236,15 @@ class Trainer:
         if getattr(config, "resume_ckpt", False):
             print(f"Resuming training from {config.resume_ckpt}")
 
-            # Try new format first (model.pt with LoRA weights)
+            # Try new format first (model.pt with weights)
             model_path = os.path.join(config.resume_ckpt, "model.pt")
             if os.path.exists(model_path):
                 print(f"Loading checkpoint from {model_path}")
                 checkpoint = torch.load(model_path, map_location="cpu")
+
+                # Check weights type
+                weights_type = checkpoint.get("weights_type", "lora")
+                print(f"Checkpoint weights type: {weights_type}")
 
                 # Load step
                 if "step" in checkpoint:
@@ -250,25 +254,31 @@ class Trainer:
                     self.step = config.resume_step
                     print(f"Resuming from step {self.step} (from config)")
 
-                # Load generator LoRA weights
-                if "generator_lora" in checkpoint:
-                    print(f"Loading generator LoRA weights ({len(checkpoint['generator_lora'])} params)")
-                    self.model.generator.load_state_dict(checkpoint["generator_lora"], strict=False)
-                    print("Generator LoRA weights loaded successfully")
+                # Load generator weights (new format uses "generator" key)
+                gen_key = "generator" if "generator" in checkpoint else "generator_lora"
+                if gen_key in checkpoint:
+                    print(f"Loading generator weights ({len(checkpoint[gen_key])} params)")
+                    # Use strict=False for LoRA (partial state), strict=True for full weights
+                    strict = (weights_type == "full")
+                    self.model.generator.load_state_dict(checkpoint[gen_key], strict=strict)
+                    print("Generator weights loaded successfully")
 
-                # Load critic LoRA weights
-                if "critic_lora" in checkpoint:
-                    print(f"Loading critic LoRA weights ({len(checkpoint['critic_lora'])} params)")
-                    self.model.fake_score.load_state_dict(checkpoint["critic_lora"], strict=False)
-                    print("Critic LoRA weights loaded successfully")
+                # Load critic weights
+                critic_key = "critic" if "critic" in checkpoint else "critic_lora"
+                if critic_key in checkpoint:
+                    print(f"Loading critic weights ({len(checkpoint[critic_key])} params)")
+                    strict = (weights_type == "full")
+                    self.model.fake_score.load_state_dict(checkpoint[critic_key], strict=strict)
+                    print("Critic weights loaded successfully")
 
-                # Load EMA LoRA weights if applicable
-                if "generator_ema_lora" in checkpoint and self.generator_ema is not None:
-                    print(f"Loading generator EMA LoRA weights ({len(checkpoint['generator_ema_lora'])} params)")
-                    self.generator_ema.load_state_dict(checkpoint["generator_ema_lora"])
-                    print("Generator EMA LoRA weights loaded successfully")
+                # Load EMA weights if applicable
+                ema_key = "generator_ema" if "generator_ema" in checkpoint else "generator_ema_lora"
+                if ema_key in checkpoint and self.generator_ema is not None:
+                    print(f"Loading generator EMA weights ({len(checkpoint[ema_key])} params)")
+                    self.generator_ema.load_state_dict(checkpoint[ema_key])
+                    print("Generator EMA weights loaded successfully")
 
-                # Load optimizer states
+                # Load optimizer states if available
                 optimizer_path = os.path.join(config.resume_ckpt, "optimizer.pt")
                 if os.path.exists(optimizer_path):
                     print(f"Loading optimizer states from {optimizer_path}")
@@ -326,6 +336,8 @@ class Trainer:
 
         self.max_grad_norm_generator = getattr(config, "max_grad_norm_generator", 10.0)
         self.max_grad_norm_critic = getattr(config, "max_grad_norm_critic", 10.0)
+        self.save_weights_only = getattr(config, "save_weights_only", True)
+        self.use_lora = getattr(config, "lora_rank", 0) > 0
         self.previous_time = None
 
     def _extract_lora_state_dict(self, full_state_dict):
@@ -342,42 +354,54 @@ class Trainer:
         generator_state_dict = fsdp_state_dict(self.model.generator)
         critic_state_dict = fsdp_state_dict(self.model.fake_score)
 
-        # Extract only LoRA weights to save space
-        generator_lora_state_dict = self._extract_lora_state_dict(generator_state_dict)
-        critic_lora_state_dict = self._extract_lora_state_dict(critic_state_dict)
+        # Determine what weights to save based on training mode
+        if self.use_lora:
+            # LoRA training: save only LoRA weights
+            generator_weights = self._extract_lora_state_dict(generator_state_dict)
+            critic_weights = self._extract_lora_state_dict(critic_state_dict)
+            print(f"Generator LoRA params: {len(generator_weights)} / {len(generator_state_dict)} total")
+            print(f"Critic LoRA params: {len(critic_weights)} / {len(critic_state_dict)} total")
+            weights_type = "lora"
+        else:
+            # Full finetuning: save full weights
+            generator_weights = generator_state_dict
+            critic_weights = critic_state_dict
+            print(f"Generator params: {len(generator_weights)}")
+            print(f"Critic params: {len(critic_weights)}")
+            weights_type = "full"
 
-        print(f"Generator LoRA params: {len(generator_lora_state_dict)} / {len(generator_state_dict)} total")
-        print(f"Critic LoRA params: {len(critic_lora_state_dict)} / {len(critic_state_dict)} total")
-
-        # Build checkpoint dict with LoRA weights
+        # Build checkpoint dict
         checkpoint = {
-            "generator_lora": generator_lora_state_dict,
-            "critic_lora": critic_lora_state_dict,
+            "generator": generator_weights,
+            "critic": critic_weights,
             "step": self.step,
+            "weights_type": weights_type,  # "lora" or "full"
         }
 
         # Add EMA state if applicable
         if (self.ema_weight > 0.0) and (self.ema_start_step < self.step) and self.generator_ema is not None:
-            # Extract LoRA weights from EMA as well
             ema_state_dict = self.generator_ema.state_dict()
-            ema_lora_state_dict = self._extract_lora_state_dict(ema_state_dict)
-            checkpoint["generator_ema_lora"] = ema_lora_state_dict
+            if self.use_lora:
+                checkpoint["generator_ema"] = self._extract_lora_state_dict(ema_state_dict)
+            else:
+                checkpoint["generator_ema"] = ema_state_dict
 
         if self.is_main_process:
             ckpt_dir = os.path.join(self.output_path, f"checkpoint_model_{self.step:06d}")
             os.makedirs(ckpt_dir, exist_ok=True)
 
-            # Save LoRA weights
+            # Save weights
             torch.save(checkpoint, os.path.join(ckpt_dir, "model.pt"))
-            print(f"LoRA weights saved to {os.path.join(ckpt_dir, 'model.pt')}")
+            print(f"{weights_type.upper()} weights saved to {os.path.join(ckpt_dir, 'model.pt')}")
 
-            # Save optimizer states for resume training
-            optimizer_state = {
-                "generator_optimizer": self.generator_optimizer.state_dict(),
-                "critic_optimizer": self.critic_optimizer.state_dict(),
-            }
-            torch.save(optimizer_state, os.path.join(ckpt_dir, "optimizer.pt"))
-            print(f"Optimizer states saved to {os.path.join(ckpt_dir, 'optimizer.pt')}")
+            # Save optimizer states only if save_weights_only is False
+            if not self.save_weights_only:
+                optimizer_state = {
+                    "generator_optimizer": self.generator_optimizer.state_dict(),
+                    "critic_optimizer": self.critic_optimizer.state_dict(),
+                }
+                torch.save(optimizer_state, os.path.join(ckpt_dir, "optimizer.pt"))
+                print(f"Optimizer states saved to {os.path.join(ckpt_dir, 'optimizer.pt')}")
 
     def fwdbwd_one_step(self, batch, train_generator):
         self.model.eval()  # prevent any randomness (e.g. dropout)
