@@ -79,8 +79,8 @@ dfake_gen_update_ratio: 5
 
 # Image dimensions (reduce for memory - original was 1785x1340)
 # Start with 512x512 to verify training works, then increase
-height: 512
-width: 512
+# height: 1024
+# width: 1024
 
 # Logging
 log_iters: 100

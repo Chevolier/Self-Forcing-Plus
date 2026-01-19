@@ -184,8 +184,8 @@ class Trainer:
             data_max_count = config.get("data_max_count", 100000)
             dataset = ImageEditDataset(
                 data_path=config.data_path,
-                height=getattr(config, "height", 1024),
-                width=getattr(config, "width", 1024),
+                height=getattr(config, "height", None),
+                width=getattr(config, "width", None),
                 max_count=data_max_count,
                 metadata_path=getattr(config, "metadata_path", None),
                 data_file_keys=getattr(config, "data_file_keys", None),

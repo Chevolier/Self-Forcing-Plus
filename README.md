@@ -44,7 +44,7 @@ data_folder
   |__xxx.txt
 ```
 
-### DMD Training
+<!-- ### DMD Training
 ```
 torchrun --nnodes=8 --nproc_per_node=8 \
 --rdzv_id=5235 \
@@ -55,7 +55,7 @@ train.py \
 --logdir logs/self_forcing_14b_dmd \
 --no_visualize \
 --disable-wandb
-```
+``` -->
 
 Our training run uses 3000 iterations and completes in under 3 days using 64 H100 GPUs.
 
@@ -63,7 +63,7 @@ Our training run uses 3000 iterations and completes in under 3 days using 64 H10
 
 ### DataSet Preparation
 
-1. Generate a series of videos using the original Wan2.1 model.
+<!-- 1. Generate a series of videos using the original Wan2.1 model.
 
 2. Generate the VAE latents.
 ```bash
@@ -93,6 +93,10 @@ train.py \
 --logdir logs/self_forcing_14b_i2v_dmd \
 --no_visualize \
 --disable-wandb
+``` -->
+
+```bash
+nohup bash scripts/train_qwen_dmd.sh > logs/dmd.out 2>&1 &
 ```
 
 Our training run uses 1000 iterations and completes in under 12 hours using 64 H100 GPUs.

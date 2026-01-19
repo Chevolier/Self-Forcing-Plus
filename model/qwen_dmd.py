@@ -83,9 +83,14 @@ class QwenDMD(nn.Module):
         else:
             self.scheduler.alphas_cumprod = None
 
-        # Image dimensions
-        self.height = getattr(args, "height", 1024)
-        self.width = getattr(args, "width", 1024)
+        # Image dimensions (None means dynamic based on edit image)
+        self.height = getattr(args, "height", None)
+        self.width = getattr(args, "width", None)
+
+        # Dynamic sizing parameters (when height/width are None)
+        self.max_pixels = getattr(args, "max_pixels", 1024 * 1024)
+        self.height_division_factor = getattr(args, "height_division_factor", 16)
+        self.width_division_factor = getattr(args, "width_division_factor", 16)
 
     def _initialize_models(self, args, device):
         """Initialize generator, real_score, fake_score, text_encoder, and VAE.
@@ -232,6 +237,54 @@ class QwenDMD(nn.Module):
             if "lora" in name.lower():
                 param.requires_grad = True
 
+    def _get_image_size_from_latent(self, latent: torch.Tensor) -> Tuple[int, int]:
+        """
+        Compute image height and width from latent tensor shape.
+
+        Args:
+            latent: [B, C, H, W] latent tensor
+
+        Returns:
+            (height, width) tuple for the corresponding image
+        """
+        # Latent spatial dimensions are 1/8 of image dimensions (VAE downsampling)
+        latent_height, latent_width = latent.shape[2], latent.shape[3]
+        height = latent_height * 8
+        width = latent_width * 8
+        return height, width
+
+    def _get_target_size(self, original_height: int, original_width: int) -> Tuple[int, int]:
+        """
+        Compute target size based on max_pixels constraint.
+
+        If height and width are explicitly set, use them.
+        Otherwise, scale based on max_pixels while preserving aspect ratio.
+
+        Args:
+            original_height: original image height
+            original_width: original image width
+
+        Returns:
+            (height, width) tuple for target size
+        """
+        # If explicit dimensions are set, use them
+        if self.height is not None and self.width is not None:
+            return self.height, self.width
+
+        height, width = original_height, original_width
+
+        # Scale down if exceeds max_pixels
+        if height * width > self.max_pixels:
+            scale = (height * width / self.max_pixels) ** 0.5
+            height = int(height / scale)
+            width = int(width / scale)
+
+        # Round to division factors (VAE compatibility)
+        height = height // self.height_division_factor * self.height_division_factor
+        width = width // self.width_division_factor * self.width_division_factor
+
+        return height, width
+
     def _get_timestep(
         self,
         min_timestep: int,
@@ -274,13 +327,16 @@ class QwenDMD(nn.Module):
             grad: KL gradient tensor
             log_dict: logging info
         """
+        # Compute image dimensions from latent shape
+        height, width = self._get_image_size_from_latent(noisy_latent)
+
         # Step 1: Compute fake score prediction
         _, pred_fake_cond = self.fake_score(
             noisy_latent=noisy_latent,
             conditional_dict=conditional_dict,
             timestep=timestep,
-            height=self.height,
-            width=self.width,
+            height=height,
+            width=width,
         )
 
         if self.fake_guidance_scale != 0.0 and unconditional_dict is not None:
@@ -288,8 +344,8 @@ class QwenDMD(nn.Module):
                 noisy_latent=noisy_latent,
                 conditional_dict=unconditional_dict,
                 timestep=timestep,
-                height=self.height,
-                width=self.width,
+                height=height,
+                width=width,
             )
             pred_fake = pred_fake_cond + (
                 pred_fake_cond - pred_fake_uncond
@@ -302,8 +358,8 @@ class QwenDMD(nn.Module):
             noisy_latent=noisy_latent,
             conditional_dict=conditional_dict,
             timestep=timestep,
-            height=self.height,
-            width=self.width,
+            height=height,
+            width=width,
         )
 
         if unconditional_dict is not None:
@@ -311,8 +367,8 @@ class QwenDMD(nn.Module):
                 noisy_latent=noisy_latent,
                 conditional_dict=unconditional_dict,
                 timestep=timestep,
-                height=self.height,
-                width=self.width,
+                height=height,
+                width=width,
             )
             pred_real = pred_real_cond + (
                 pred_real_cond - pred_real_uncond
@@ -427,9 +483,20 @@ class QwenDMD(nn.Module):
         if self.inference_pipeline is None:
             self._initialize_inference_pipeline()
 
+        # Compute dimensions from edit_latent or use defaults
+        if edit_latent is not None:
+            # edit_latent already has correct dimensions from dataset processing
+            height, width = self._get_image_size_from_latent(edit_latent)
+        elif self.height is not None and self.width is not None:
+            # Use explicitly configured dimensions
+            height, width = self.height, self.width
+        else:
+            # Default to max_pixels-constrained square
+            height, width = self._get_target_size(1024, 1024)
+
         # Generate noise
-        latent_height = self.height // 8
-        latent_width = self.width // 8
+        latent_height = height // 8
+        latent_width = width // 8
         noise = torch.randn(
             batch_size, 16, latent_height, latent_width,
             device=self.device, dtype=self.dtype
@@ -441,8 +508,8 @@ class QwenDMD(nn.Module):
             noise=noise,
             conditional_dict=conditional_dict,
             edit_latent=edit_latent,
-            height=self.height,
-            width=self.width,
+            height=height,
+            width=width,
         )
 
         return pred_latent, gradient_mask, denoised_from, denoised_to
@@ -546,13 +613,16 @@ class QwenDMD(nn.Module):
             generated_latent, critic_noise, critic_timestep
         )
 
+        # Compute dimensions from generated latent
+        height, width = self._get_image_size_from_latent(generated_latent)
+
         # Step 4: Get fake score prediction
         _, pred_fake = self.fake_score(
             noisy_latent=noisy_generated,
             conditional_dict=conditional_dict,
             timestep=critic_timestep,
-            height=self.height,
-            width=self.width,
+            height=height,
+            width=width,
         )
 
         # Step 5: Compute denoising loss

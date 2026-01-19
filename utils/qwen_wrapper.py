@@ -26,14 +26,14 @@ class QwenFlowMatchScheduler:
     """
     Flow matching scheduler adapted for Qwen-Image models.
     Uses Qwen-specific sigma scheduling.
-    Compatible with DiffSynth-Studio's set_timesteps API.
+    Compatible with DiffSynth-Studio's FlowMatchScheduler API.
     """
 
     def __init__(
         self,
         num_train_timesteps: int = 1000,
         mu: float = 0.8,
-        shift_terminal: float = 0.02,
+        shift_terminal: float = None,
     ):
         self.num_train_timesteps = num_train_timesteps
         self.mu = mu
@@ -42,13 +42,27 @@ class QwenFlowMatchScheduler:
         # Initialize with default 1000 steps for training
         self._compute_sigmas_for_training()
 
+    @staticmethod
+    def _calculate_shift_qwen_image(image_seq_len, base_seq_len=256, max_seq_len=4096, base_shift=0.5, max_shift=1.15):
+        """
+        Calculate dynamic shift (mu) based on image sequence length.
+        Parameters matched with official diffusers QwenImageEditPlusPipeline.
+        """
+        m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
+        b = base_shift - m * base_seq_len
+        mu = image_seq_len * m + b
+        return mu
+
     def _compute_sigmas_for_training(self):
         """Pre-compute sigmas for full training timesteps."""
         sigmas = torch.linspace(1.0, 0.0, self.num_train_timesteps + 1)[:-1]
         sigmas = math.exp(self.mu) / (math.exp(self.mu) + (1 / sigmas - 1))
-        one_minus_z = 1 - sigmas
-        scale_factor = one_minus_z[-1] / (1 - self.shift_terminal)
-        sigmas = 1 - (one_minus_z / scale_factor)
+
+        # Apply terminal shift only if specified (default off to match official diffusers)
+        if self.shift_terminal is not None:
+            one_minus_z = 1 - sigmas
+            scale_factor = one_minus_z[-1] / (1 - self.shift_terminal)
+            sigmas = 1 - (one_minus_z / scale_factor)
 
         self.sigmas = sigmas
         self.timesteps = sigmas * self.num_train_timesteps
@@ -61,16 +75,40 @@ class QwenFlowMatchScheduler:
         num_inference_steps: int = 8,
         denoising_strength: float = 1.0,
         device: torch.device = None,
+        exponential_shift_mu: float = None,
+        dynamic_shift_len: int = None,
+        custom_timesteps: torch.Tensor = None,
+        shift_terminal: float = None,
     ):
         """
         Set timesteps for inference/training with specified number of steps.
-        Compatible with DiffSynth-Studio API.
+        Compatible with DiffSynth-Studio's FlowMatchScheduler API.
 
         Args:
             num_inference_steps: Number of denoising steps (e.g., 8 for student)
             denoising_strength: Strength of denoising (1.0 = full)
             device: Device to place tensors on
+            exponential_shift_mu: Override mu for exponential shift
+            dynamic_shift_len: Image sequence length for dynamic mu calculation
+            custom_timesteps: Use custom timesteps directly (list, tuple, or tensor)
+            shift_terminal: Terminal shift value (None = off, matching official diffusers)
         """
+        # Use custom timesteps if provided
+        if custom_timesteps is not None:
+            if isinstance(custom_timesteps, (list, tuple)):
+                custom_timesteps = torch.tensor(custom_timesteps)
+            timesteps = custom_timesteps.clone()
+            sigmas = timesteps / self.num_train_timesteps
+
+            if device is not None:
+                sigmas = sigmas.to(device)
+                timesteps = timesteps.to(device)
+
+            self.inference_sigmas = sigmas
+            self.inference_timesteps = timesteps
+            self.num_inference_steps = len(timesteps)
+            return sigmas, timesteps
+
         sigma_min = 0.0
         sigma_max = 1.0
 
@@ -78,13 +116,22 @@ class QwenFlowMatchScheduler:
         sigma_start = sigma_min + (sigma_max - sigma_min) * denoising_strength
         sigmas = torch.linspace(sigma_start, sigma_min, num_inference_steps + 1)[:-1]
 
-        # Apply exponential shift (Qwen-specific)
-        sigmas = math.exp(self.mu) / (math.exp(self.mu) + (1 / sigmas - 1))
+        # Determine mu value
+        if exponential_shift_mu is not None:
+            mu = exponential_shift_mu
+        elif dynamic_shift_len is not None:
+            mu = self._calculate_shift_qwen_image(dynamic_shift_len)
+        else:
+            mu = self.mu
 
-        # Apply terminal shift to prevent collapse
-        one_minus_z = 1 - sigmas
-        scale_factor = one_minus_z[-1] / (1 - self.shift_terminal)
-        sigmas = 1 - (one_minus_z / scale_factor)
+        # Apply exponential shift (Qwen-specific)
+        sigmas = math.exp(mu) / (math.exp(mu) + (1 / sigmas - 1))
+
+        # Apply terminal shift only if specified (default off to match official diffusers)
+        if shift_terminal is not None:
+            one_minus_z = 1 - sigmas
+            scale_factor = one_minus_z[-1] / (1 - shift_terminal)
+            sigmas = 1 - (one_minus_z / scale_factor)
 
         # Compute timesteps
         timesteps = sigmas * self.num_train_timesteps
