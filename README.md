@@ -95,8 +95,29 @@ train.py \
 --disable-wandb
 ``` -->
 
+
 ```bash
 nohup bash scripts/train_qwen_dmd.sh > logs/dmd.out 2>&1 &
+```
+
+### Evaluation
+
+```bash
+# Evaluate DMD trained LoRA models
+      --lora_path /home/ec2-user/SageMaker/efs/Projects/Self-Forcing-Plus/checkpoints/checkpoint_000100/generator.safetensors \
+
+CUDA_VISIBLE_DEVICES=1 python benchmark.py \
+      --model_path /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/checkpoints/Qwen-Image-Edit-2509-step4000 \
+      --test_path /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/data/test_data.csv \
+      --data_dir /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/data \
+      --output_dir outputs/H100_ckpt4k_dmd_sam3k_tstep200_istep8 \
+      --cfg_scale 1 \
+      --num_inference_steps 8 \
+      --prompt "让图2的模特换上图1的下装" \
+      --max_samples 50 \
+      --seed 1 \
+      > logs/H100_ckpt4k_dmd_sam3k_tstep200_istep8.out 2>&1 &
+
 ```
 
 Our training run uses 1000 iterations and completes in under 12 hours using 64 H100 GPUs.
