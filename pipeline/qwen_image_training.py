@@ -102,6 +102,7 @@ class QwenImageTrainingPipeline:
                         timestep=timestep_tensor,
                         height=height,
                         width=width,
+                        edit_latents=edit_latent,  # Pass edit latent as conditioning
                     )
 
                     # Add noise for next step
@@ -121,6 +122,7 @@ class QwenImageTrainingPipeline:
                     timestep=timestep_tensor,
                     height=height,
                     width=width,
+                    edit_latents=edit_latent,  # Pass edit latent as conditioning
                 )
 
                 exit_timestep = timestep_val
@@ -227,25 +229,35 @@ class QwenImageInferencePipeline:
                 (batch_size,), timestep_val, device=self.device, dtype=torch.long
             )
 
-            _, denoised = generator(
+            # Get flow prediction (velocity) from model
+            # Pass edit_latent as conditioning context (not just initialization)
+            flow_pred, _ = generator(
                 noisy_latent=noisy_latent,
                 conditional_dict=conditional_dict,
                 timestep=timestep_tensor,
                 height=height,
                 width=width,
+                edit_latents=edit_latent,  # Pass edit latent as conditioning
             )
 
-            # Prepare for next step
+            # Use flow matching step: x_{t-1} = x_t + v * (sigma_{t-1} - sigma_t)
             if step_idx + 1 < len(timesteps):
                 next_t = timesteps[step_idx + 1]
-                next_t_val = next_t.item() if isinstance(next_t, torch.Tensor) else next_t
-                noisy_latent = generator.scheduler.add_noise(
-                    denoised,
-                    noise,
-                    torch.full((batch_size,), next_t_val, device=self.device),
+                next_t_tensor = torch.full((batch_size,), next_t.item() if isinstance(next_t, torch.Tensor) else next_t, device=self.device)
+                noisy_latent = generator.scheduler.step(
+                    model_output=flow_pred,
+                    timestep=timestep_tensor,
+                    sample=noisy_latent,
+                    next_timestep=next_t_tensor,
                 )
             else:
-                noisy_latent = denoised
+                # Final step: step to sigma=0
+                noisy_latent = generator.scheduler.step(
+                    model_output=flow_pred,
+                    timestep=timestep_tensor,
+                    sample=noisy_latent,
+                    next_timestep=None,  # sigma=0
+                )
 
         if return_latents:
             return noisy_latent

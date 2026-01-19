@@ -658,11 +658,40 @@ class QwenImageDiT(torch.nn.Module):
         prompt_emb_mask=None,
         height=None,
         width=None,
+        edit_latents=None,
     ):
+        """
+        Forward pass for QwenImageDiT.
+
+        Args:
+            latents: [B, C, H, W] noisy latent for generation
+            timestep: [B] normalized timesteps in [0, 1] range
+            prompt_emb: [B, L, D] text embeddings
+            prompt_emb_mask: [B, L] attention mask for text
+            height: image height in pixels
+            width: image width in pixels
+            edit_latents: Optional list of [B, C, H, W] edit image latents for conditioning
+        """
+        # Build img_shapes for position embeddings
         img_shapes = [(latents.shape[0], latents.shape[2]//2, latents.shape[3]//2)]
         txt_seq_lens = prompt_emb_mask.sum(dim=1).tolist()
-        
+
+        # Process main latents
         image = rearrange(latents, "B C (H P) (W Q) -> B (H W) (C P Q)", H=height//16, W=width//16, P=2, Q=2)
+        image_seq_len = image.shape[1]  # Store original sequence length
+
+        # Process and concatenate edit_latents if provided (for image editing)
+        # This matches DiffSynth's model_fn_qwen_image behavior
+        if edit_latents is not None:
+            edit_latents_list = edit_latents if isinstance(edit_latents, list) else [edit_latents]
+            for e in edit_latents_list:
+                img_shapes.append((e.shape[0], e.shape[2]//2, e.shape[3]//2))
+            edit_images = [
+                rearrange(e, "B C (H P) (W Q) -> B (H W) (C P Q)", H=e.shape[2]//2, W=e.shape[3]//2, P=2, Q=2)
+                for e in edit_latents_list
+            ]
+            image = torch.cat([image] + edit_images, dim=1)
+
         image = self.img_in(image)
         text = self.txt_in(self.txt_norm(prompt_emb))
 
@@ -677,9 +706,12 @@ class QwenImageDiT(torch.nn.Module):
                 temb=conditioning,
                 image_rotary_emb=image_rotary_emb,
             )
-        
+
         image = self.norm_out(image, conditioning)
         image = self.proj_out(image)
+
+        # Only take the output for the main generation latents (not edit latents)
+        image = image[:, :image_seq_len]
 
         latents = rearrange(image, "B (H W) (C P Q) -> B C (H P) (W Q)", H=height//16, W=width//16, P=2, Q=2)
         return latents

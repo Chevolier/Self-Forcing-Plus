@@ -202,7 +202,16 @@ class QwenFlowMatchScheduler:
 
 
 class QwenTextEncoderWrapper(nn.Module):
-    """Wrapper for Qwen2.5-VL text encoder."""
+    """Wrapper for Qwen2.5-VL text encoder with multimodal support."""
+
+    # Templates matching DiffSynth-Studio
+    TEMPLATE_TEXT_ONLY = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+    TEMPLATE_EDIT = "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
+    TEMPLATE_EDIT_MULTI = "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+    IMG_PROMPT_TEMPLATE = "Picture {}: <|vision_start|><|image_pad|><|vision_end|>"
+
+    DROP_IDX_TEXT_ONLY = 34
+    DROP_IDX_EDIT = 64
 
     def __init__(self, model_name: str = "Qwen-Image-Edit-2509", load_weights: bool = True):
         super().__init__()
@@ -224,13 +233,15 @@ class QwenTextEncoderWrapper(nn.Module):
         """Load text encoder weights from safetensors or pytorch files."""
         import glob
         from safetensors.torch import load_file
+        from tqdm import tqdm
 
         # Find safetensors files
-        safetensor_files = glob.glob(os.path.join(path, "*.safetensors"))
+        safetensor_files = sorted(glob.glob(os.path.join(path, "*.safetensors")))
         if safetensor_files:
             state_dict = {}
-            for f in safetensor_files:
+            for f in tqdm(safetensor_files, desc="Loading text encoder shards", unit="file"):
                 state_dict.update(load_file(f))
+            print(f"Loading state dict ({len(state_dict)} keys)...")
             self.text_encoder.load_state_dict(state_dict, strict=False)
             print(f"Loaded text encoder from {path}")
 
@@ -254,40 +265,214 @@ class QwenTextEncoderWrapper(nn.Module):
                 self._tokenizer = Qwen2Tokenizer.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
         return self._tokenizer
 
-    def forward(self, text_prompts: List[str]) -> Dict[str, torch.Tensor]:
-        """Encode text prompts to embeddings."""
+    def _get_processor(self):
+        """Get or create Qwen2VL processor for multimodal encoding (cached)."""
+        if not hasattr(self, '_processor'):
+            from transformers import Qwen2VLProcessor
+            model_path = get_model_path(self.model_name)
+            # Processor is in 'processor' subfolder (not 'tokenizer')
+            processor_path = os.path.join(model_path, "processor")
+            if os.path.exists(processor_path):
+                self._processor = Qwen2VLProcessor.from_pretrained(processor_path)
+            else:
+                self._processor = Qwen2VLProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
+        return self._processor
+
+    def _resize_image_for_encoder(self, image, target_area: int = 384 * 384):
+        """Resize image for text encoder (smaller than DiT input)."""
+        width, height = image.size
+        aspect_ratio = width / height
+        calc_width = math.sqrt(target_area * aspect_ratio)
+        calc_height = calc_width / aspect_ratio
+        calc_width = round(calc_width / 32) * 32
+        calc_height = round(calc_height / 32) * 32
+        return image.resize((int(calc_width), int(calc_height)))
+
+    def _extract_masked_hidden(self, hidden_states: torch.Tensor, mask: torch.Tensor):
+        """Extract hidden states based on attention mask."""
+        bool_mask = mask.bool()
+        valid_lengths = bool_mask.sum(dim=1)
+        selected = hidden_states[bool_mask]
+        split_result = torch.split(selected, valid_lengths.tolist(), dim=0)
+        return split_result
+
+    def forward(
+        self,
+        text_prompts: List[str],
+        edit_images: Optional[List] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Encode text prompts to embeddings, optionally with edit images.
+
+        Args:
+            text_prompts: List of text prompts
+            edit_images: Optional list of PIL images for multimodal encoding.
+                        Images will be resized to 384x384 area for text encoder.
+
+        Returns:
+            Dict with 'prompt_embeds' and 'attention_mask'
+        """
+        device = self.device
+
+        if edit_images is None:
+            # Text-only encoding
+            return self._encode_text_only(text_prompts, device)
+        elif isinstance(edit_images, list) and len(edit_images) > 1:
+            # Multi-image edit encoding
+            return self._encode_edit_multi(text_prompts, edit_images, device)
+        else:
+            # Single image edit encoding
+            if isinstance(edit_images, list):
+                edit_images = edit_images[0]
+            return self._encode_edit_single(text_prompts, edit_images, device)
+
+    def _encode_text_only(self, text_prompts: List[str], device: torch.device) -> Dict[str, torch.Tensor]:
+        """Encode text-only prompts (no images)."""
         tokenizer = self._get_tokenizer()
 
-        # Tokenize
+        # Apply template
+        txt = [self.TEMPLATE_TEXT_ONLY.format(p) for p in text_prompts]
+
         inputs = tokenizer(
-            text_prompts,
+            txt,
             padding=True,
             truncation=True,
-            max_length=512,
+            max_length=4096 + self.DROP_IDX_TEXT_ONLY,
             return_tensors="pt",
         )
 
-        # Move to GPU explicitly using current device for FSDP compatibility
-        device = self.device
         input_ids = inputs["input_ids"].to(device)
         attention_mask = inputs["attention_mask"].to(device)
 
-        # Forward pass
-        # QwenImageTextEncoder returns outputs.hidden_states which is a tuple
-        # The last element [-1] is the final hidden state
         with torch.no_grad():
             hidden_states = self.text_encoder(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
             )
 
-        # hidden_states is a tuple of all layer hidden states
-        # Use the last one as the prompt embedding
         last_hidden_state = hidden_states[-1]
 
+        # Extract and drop template prefix
+        split_hidden_states = self._extract_masked_hidden(last_hidden_state, attention_mask)
+        split_hidden_states = [e[self.DROP_IDX_TEXT_ONLY:] for e in split_hidden_states]
+
+        # Pad to same length
+        attn_mask_list = [torch.ones(e.size(0), dtype=torch.long, device=device) for e in split_hidden_states]
+        max_seq_len = max([e.size(0) for e in split_hidden_states])
+        prompt_embeds = torch.stack([
+            torch.cat([u, u.new_zeros(max_seq_len - u.size(0), u.size(1))])
+            for u in split_hidden_states
+        ])
+        encoder_attention_mask = torch.stack([
+            torch.cat([u, u.new_zeros(max_seq_len - u.size(0))])
+            for u in attn_mask_list
+        ])
+
         return {
-            "prompt_embeds": last_hidden_state,
-            "attention_mask": attention_mask,
+            "prompt_embeds": prompt_embeds,
+            "attention_mask": encoder_attention_mask,
+        }
+
+    def _encode_edit_single(self, text_prompts: List[str], edit_image, device: torch.device) -> Dict[str, torch.Tensor]:
+        """Encode text with single edit image (multimodal)."""
+        processor = self._get_processor()
+
+        # Resize image for text encoder (384x384 area)
+        edit_image_resized = self._resize_image_for_encoder(edit_image)
+
+        # Apply template
+        txt = [self.TEMPLATE_EDIT.format(p) for p in text_prompts]
+
+        model_inputs = processor(
+            text=txt,
+            images=edit_image_resized,
+            padding=True,
+            return_tensors="pt",
+        ).to(device)
+
+        with torch.no_grad():
+            hidden_states = self.text_encoder(
+                input_ids=model_inputs.input_ids,
+                attention_mask=model_inputs.attention_mask,
+                pixel_values=model_inputs.pixel_values,
+                image_grid_thw=model_inputs.image_grid_thw,
+            )
+
+        last_hidden_state = hidden_states[-1]
+
+        # Extract and drop template prefix
+        split_hidden_states = self._extract_masked_hidden(last_hidden_state, model_inputs.attention_mask)
+        split_hidden_states = [e[self.DROP_IDX_EDIT:] for e in split_hidden_states]
+
+        # Pad to same length
+        attn_mask_list = [torch.ones(e.size(0), dtype=torch.long, device=device) for e in split_hidden_states]
+        max_seq_len = max([e.size(0) for e in split_hidden_states])
+        prompt_embeds = torch.stack([
+            torch.cat([u, u.new_zeros(max_seq_len - u.size(0), u.size(1))])
+            for u in split_hidden_states
+        ])
+        encoder_attention_mask = torch.stack([
+            torch.cat([u, u.new_zeros(max_seq_len - u.size(0))])
+            for u in attn_mask_list
+        ])
+
+        return {
+            "prompt_embeds": prompt_embeds,
+            "attention_mask": encoder_attention_mask,
+        }
+
+    def _encode_edit_multi(self, text_prompts: List[str], edit_images: List, device: torch.device) -> Dict[str, torch.Tensor]:
+        """Encode text with multiple edit images (multimodal)."""
+        processor = self._get_processor()
+
+        # Resize images for text encoder (384x384 area)
+        edit_images_resized = [self._resize_image_for_encoder(img) for img in edit_images]
+
+        # Build image prompt prefix (Picture 1: <image>, Picture 2: <image>, ...)
+        base_img_prompt = "".join([
+            self.IMG_PROMPT_TEMPLATE.format(i + 1)
+            for i in range(len(edit_images))
+        ])
+
+        # Apply template
+        txt = [self.TEMPLATE_EDIT_MULTI.format(base_img_prompt + p) for p in text_prompts]
+
+        model_inputs = processor(
+            text=txt,
+            images=edit_images_resized,
+            padding=True,
+            return_tensors="pt",
+        ).to(device)
+
+        with torch.no_grad():
+            hidden_states = self.text_encoder(
+                input_ids=model_inputs.input_ids,
+                attention_mask=model_inputs.attention_mask,
+                pixel_values=model_inputs.pixel_values,
+                image_grid_thw=model_inputs.image_grid_thw,
+            )
+
+        last_hidden_state = hidden_states[-1]
+
+        # Extract and drop template prefix
+        split_hidden_states = self._extract_masked_hidden(last_hidden_state, model_inputs.attention_mask)
+        split_hidden_states = [e[self.DROP_IDX_EDIT:] for e in split_hidden_states]
+
+        # Pad to same length
+        attn_mask_list = [torch.ones(e.size(0), dtype=torch.long, device=device) for e in split_hidden_states]
+        max_seq_len = max([e.size(0) for e in split_hidden_states])
+        prompt_embeds = torch.stack([
+            torch.cat([u, u.new_zeros(max_seq_len - u.size(0), u.size(1))])
+            for u in split_hidden_states
+        ])
+        encoder_attention_mask = torch.stack([
+            torch.cat([u, u.new_zeros(max_seq_len - u.size(0))])
+            for u in attn_mask_list
+        ])
+
+        return {
+            "prompt_embeds": prompt_embeds,
+            "attention_mask": encoder_attention_mask,
         }
 
 
@@ -323,12 +508,14 @@ class QwenVAEWrapper(nn.Module):
         """Load VAE weights."""
         import glob
         from safetensors.torch import load_file
+        from tqdm import tqdm
 
-        safetensor_files = glob.glob(os.path.join(path, "*.safetensors"))
+        safetensor_files = sorted(glob.glob(os.path.join(path, "*.safetensors")))
         if safetensor_files:
             state_dict = {}
-            for f in safetensor_files:
+            for f in tqdm(safetensor_files, desc="Loading VAE shards", unit="file"):
                 state_dict.update(load_file(f))
+            print(f"Loading state dict ({len(state_dict)} keys)...")
             self.model.load_state_dict(state_dict, strict=False)
             print(f"Loaded VAE from {path}")
 
@@ -431,12 +618,14 @@ class QwenDiffusionWrapper(nn.Module):
         """Load DiT weights."""
         import glob
         from safetensors.torch import load_file
+        from tqdm import tqdm
 
-        safetensor_files = glob.glob(os.path.join(path, "*.safetensors"))
+        safetensor_files = sorted(glob.glob(os.path.join(path, "*.safetensors")))
         if safetensor_files:
             state_dict = {}
-            for f in sorted(safetensor_files):
+            for f in tqdm(safetensor_files, desc="Loading DiT shards", unit="file"):
                 state_dict.update(load_file(f))
+            print(f"Loading state dict ({len(state_dict)} keys)...")
             self.model.load_state_dict(state_dict, strict=False)
             print(f"Loaded DiT from {path}")
 
@@ -504,6 +693,7 @@ class QwenDiffusionWrapper(nn.Module):
         timestep: torch.Tensor,
         height: int = 1024,
         width: int = 1024,
+        edit_latents: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> tuple:
         """
@@ -512,9 +702,10 @@ class QwenDiffusionWrapper(nn.Module):
         Args:
             noisy_latent: [B, 16, H/8, W/8] noisy latent
             conditional_dict: dict with 'prompt_embeds' and 'attention_mask'
-            timestep: [B] timesteps
+            timestep: [B] timesteps in [0, 1000] range
             height: image height
             width: image width
+            edit_latents: Optional [B, 16, H/8, W/8] or list of edit image latents for conditioning
 
         Returns:
             (flow_pred, x0_pred): flow prediction and x0 prediction
@@ -527,14 +718,19 @@ class QwenDiffusionWrapper(nn.Module):
                 prompt_embeds.shape[:2], device=prompt_embeds.device, dtype=torch.long
             )
 
+        # Normalize timestep to [0, 1] range (model expects this, has internal scale=1000)
+        # DiffSynth does: timestep = timestep / 1000
+        timestep_normalized = timestep / 1000.0
+
         # Forward through DiT
         output = self.model(
             latents=noisy_latent,
-            timestep=timestep,
+            timestep=timestep_normalized,
             prompt_emb=prompt_embeds,
             prompt_emb_mask=attention_mask,
             height=height,
             width=width,
+            edit_latents=edit_latents,
         )
 
         # Output is the flow prediction (velocity)
