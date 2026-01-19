@@ -243,7 +243,7 @@ def run_inference(
                     concatenated along channel dimension. Otherwise, only the
                     last image is used as edit_latent.
     """
-    # Get target size from the last image
+    # Get output size from the LAST image (model_image) - this is for the denoising target
     target_height, target_width = get_target_size(
         edit_images[-1],
         args.max_pixels,
@@ -251,26 +251,32 @@ def run_inference(
         args.width_division_factor,
     )
 
-    # Preprocess and encode edit images
-    edit_tensors = []
-    for img in edit_images:
-        tensor = preprocess_image(img, target_height, target_width)
-        tensor = tensor.to(device, dtype=dtype)
-        edit_tensors.append(tensor)
-
-    # Encode images to latents
+    # Preprocess and encode edit images - EACH image resized independently
+    # This matches DiffSynth's QwenImageUnit_EditImageEmbedder behavior
+    edit_latents = []
     with torch.no_grad():
-        edit_latents = [vae.encode(t) for t in edit_tensors]
+        for img in edit_images:
+            # Each image gets its own target size based on its aspect ratio
+            img_height, img_width = get_target_size(
+                img,
+                args.max_pixels,
+                args.height_division_factor,
+                args.width_division_factor,
+            )
+            tensor = preprocess_image(img, img_height, img_width)
+            tensor = tensor.to(device, dtype=dtype)
+            latent = vae.encode(tensor)
+            edit_latents.append(latent)
 
         # Pass list of latents - DiT will concatenate them in sequence dimension
-        # Each latent stays as [B, 16, H/8, W/8]
+        # Each latent can have DIFFERENT spatial dimensions
         # For initialization, the last latent (model_image) will be used
         if len(edit_latents) > 1:
             edit_latent = edit_latents  # Pass as list for multi-image
         else:
             edit_latent = edit_latents[0]  # Single tensor for single image
 
-    # Generate noise
+    # Generate noise - use target size from LAST image (model_image)
     latent_height = target_height // 8
     latent_width = target_width // 8
     noise = torch.randn(
