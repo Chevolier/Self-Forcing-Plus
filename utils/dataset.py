@@ -259,8 +259,11 @@ class ImageEditDataset(Dataset):
     def __init__(
         self,
         data_path: str,
-        height: int = 1024,
-        width: int = 1024,
+        height: int = None,
+        width: int = None,
+        max_pixels: int = 1024 * 1024,  # Default ~1M pixels (1024x1024)
+        height_division_factor: int = 16,
+        width_division_factor: int = 16,
         max_count: int = 100000,
         # CSV-specific arguments (DiffSynth-Studio compatible)
         metadata_path: str = None,
@@ -272,8 +275,11 @@ class ImageEditDataset(Dataset):
         """
         Args:
             data_path: Base path for the dataset (resolves relative paths in CSV)
-            height: Target image height
-            width: Target image width
+            height: Target image height (if None, computed from max_pixels)
+            width: Target image width (if None, computed from max_pixels)
+            max_pixels: Maximum total pixels (used when height/width are None)
+            height_division_factor: Ensure height is divisible by this (default: 16)
+            width_division_factor: Ensure width is divisible by this (default: 16)
             max_count: Maximum number of samples to load
             metadata_path: Path to CSV/JSON metadata file
             data_file_keys: Comma-separated column names containing file paths
@@ -283,6 +289,9 @@ class ImageEditDataset(Dataset):
         """
         self.height = height
         self.width = width
+        self.max_pixels = max_pixels
+        self.height_division_factor = height_division_factor
+        self.width_division_factor = width_division_factor
         self.base_path = Path(data_path)
         self.fixed_prompt = fixed_prompt
         self.samples = []
@@ -409,15 +418,65 @@ class ImageEditDataset(Dataset):
                 if len(self.samples) >= max_count:
                     break
 
-    def _load_and_process_image(self, image_path: str) -> torch.Tensor:
-        """Load an image and process it to tensor."""
+    def _get_target_size(self, image: Image.Image) -> tuple:
+        """
+        Compute target height and width based on image size and max_pixels.
+        Compatible with DiffSynth-Studio's ImageCropAndResize logic.
+        """
+        if self.height is not None and self.width is not None:
+            return self.height, self.width
+
+        width, height = image.size
+        if width * height > self.max_pixels:
+            scale = (width * height / self.max_pixels) ** 0.5
+            height, width = int(height / scale), int(width / scale)
+
+        # Round to division factors
+        height = height // self.height_division_factor * self.height_division_factor
+        width = width // self.width_division_factor * self.width_division_factor
+
+        return height, width
+
+    def _crop_and_resize(self, image: Image.Image, target_height: int, target_width: int) -> Image.Image:
+        """
+        Crop and resize image to target size while preserving aspect ratio.
+        Compatible with DiffSynth-Studio's ImageCropAndResize logic.
+        """
+        width, height = image.size
+        scale = max(target_width / width, target_height / height)
+
+        # Resize maintaining aspect ratio
+        new_width = round(width * scale)
+        new_height = round(height * scale)
+        image = image.resize((new_width, new_height), Image.LANCZOS)
+
+        # Center crop to target size
+        left = (new_width - target_width) // 2
+        top = (new_height - target_height) // 2
+        image = image.crop((left, top, left + target_width, top + target_height))
+
+        return image
+
+    def _load_and_process_image(self, image_path: str) -> tuple:
+        """
+        Load an image and process it to tensor.
+
+        Returns:
+            tuple: (image_tensor, height, width)
+        """
         image = Image.open(image_path).convert("RGB")
-        # Resize to target size
-        image = image.resize((self.width, self.height), Image.LANCZOS)
+
+        # Get target size based on max_pixels
+        target_height, target_width = self._get_target_size(image)
+
+        # Crop and resize
+        image = self._crop_and_resize(image, target_height, target_width)
+
         # Convert to tensor and normalize to [-1, 1]
         image = TF.to_tensor(image)
         image = image * 2.0 - 1.0
-        return image
+
+        return image, target_height, target_width
 
     def __len__(self):
         return len(self.samples)
@@ -431,9 +490,14 @@ class ImageEditDataset(Dataset):
 
         # Load edit images (input images for editing task)
         edit_images = []
+        target_height, target_width = None, None
         for path in sample.get("edit_image_paths", []):
             if path and os.path.exists(path):
-                edit_images.append(self._load_and_process_image(path))
+                img, h, w = self._load_and_process_image(path)
+                edit_images.append(img)
+                # Use dimensions from first image
+                if target_height is None:
+                    target_height, target_width = h, w
 
         if edit_images:
             # Stack edit images: [N, C, H, W] where N is number of edit images
@@ -444,7 +508,11 @@ class ImageEditDataset(Dataset):
         # Load label/target image (for supervised training)
         label_path = sample.get("label_image_path")
         if label_path and os.path.exists(label_path):
-            result["label_image"] = self._load_and_process_image(label_path)
+            label_img, h, w = self._load_and_process_image(label_path)
+            result["label_image"] = label_img
+            # Use label image dimensions if no edit images
+            if target_height is None:
+                target_height, target_width = h, w
         else:
             result["label_image"] = None
 
@@ -453,6 +521,10 @@ class ImageEditDataset(Dataset):
             result["source_image"] = edit_images[0]
         else:
             result["source_image"] = None
+
+        # Include image dimensions in result
+        result["height"] = target_height
+        result["width"] = target_width
 
         return result
 
