@@ -262,13 +262,13 @@ def run_inference(
     with torch.no_grad():
         edit_latents = [vae.encode(t) for t in edit_tensors]
 
-        if args.concat_images and len(edit_latents) > 1:
-            # Concatenate along channel dimension for multi-image editing
-            # [B, 16, H/8, W/8] * N -> [B, 16*N, H/8, W/8]
-            edit_latent = torch.cat(edit_latents, dim=1)
+        # Pass list of latents - DiT will concatenate them in sequence dimension
+        # Each latent stays as [B, 16, H/8, W/8]
+        # For initialization, the last latent (model_image) will be used
+        if len(edit_latents) > 1:
+            edit_latent = edit_latents  # Pass as list for multi-image
         else:
-            # Use only the last image as edit_latent (standard mode)
-            edit_latent = edit_latents[-1]
+            edit_latent = edit_latents[0]  # Single tensor for single image
 
     # Generate noise
     latent_height = target_height // 8

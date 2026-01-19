@@ -215,12 +215,25 @@ class QwenImageInferencePipeline:
         )
         timesteps = generator.scheduler.get_inference_timesteps()
 
-        # Initialize
+        # Handle edit_latent as single tensor or list of tensors
+        # For multi-image editing: list of [cloth_latent, model_latent]
+        # - Initialization uses the LAST latent (model_image - the one to edit)
+        # - DiT context receives ALL latents (both cloth and model)
         if edit_latent is not None:
+            if isinstance(edit_latent, list):
+                # Multi-image: use last (model_image) for init, all for context
+                init_latent = edit_latent[-1]
+                context_latents = edit_latent
+            else:
+                # Single image: use same for init and context
+                init_latent = edit_latent
+                context_latents = edit_latent
+
             first_sigma = generator.scheduler.inference_sigmas[0].item()
-            noisy_latent = (1 - first_sigma) * edit_latent + first_sigma * noise
+            noisy_latent = (1 - first_sigma) * init_latent + first_sigma * noise
         else:
             noisy_latent = noise
+            context_latents = None
 
         # Denoising loop
         for step_idx, timestep in enumerate(timesteps):
@@ -230,14 +243,14 @@ class QwenImageInferencePipeline:
             )
 
             # Get flow prediction (velocity) from model
-            # Pass edit_latent as conditioning context (not just initialization)
+            # Pass all edit latents as conditioning context to DiT
             flow_pred, _ = generator(
                 noisy_latent=noisy_latent,
                 conditional_dict=conditional_dict,
                 timestep=timestep_tensor,
                 height=height,
                 width=width,
-                edit_latents=edit_latent,  # Pass edit latent as conditioning
+                edit_latents=context_latents,  # Pass all latents as conditioning
             )
 
             # Use flow matching step: x_{t-1} = x_t + v * (sigma_{t-1} - sigma_t)
