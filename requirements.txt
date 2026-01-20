@@ -39,3 +39,4 @@ flask
 flask-socketio
 torchao
 peft
+pandas

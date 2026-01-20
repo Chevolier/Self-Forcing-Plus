@@ -59,11 +59,11 @@ train.py \
 
 Our training run uses 3000 iterations and completes in under 3 days using 64 H100 GPUs.
 
-## I2V-480P Training
+## Qwen-Image-Edit-2509 Training
 
-### DataSet Preparation
+<!-- ### DataSet Preparation
 
-<!-- 1. Generate a series of videos using the original Wan2.1 model.
+1. Generate a series of videos using the original Wan2.1 model.
 
 2. Generate the VAE latents.
 ```bash
@@ -80,10 +80,11 @@ python scripts/create_lmdb_14b_shards.py \
 --data_path {latent_folder} \
 --prompt_path {prompt_folder} \
 --lmdb_path {lmdb_folder}
-```
+``` -->
 
 ### DMD Training
-```
+
+<!-- ```
 torchrun --nnodes=8 --nproc_per_node=8 \
 --rdzv_id=5235 \
 --rdzv_backend=c10d \
