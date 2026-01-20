@@ -159,10 +159,18 @@ class QwenFlowMatchScheduler:
         timesteps: torch.Tensor,
     ) -> torch.Tensor:
         """Add noise to samples using flow matching formulation."""
+        # Use inference schedule if available (matches DiffSynth behavior)
+        if hasattr(self, 'inference_timesteps') and hasattr(self, 'inference_sigmas'):
+            ref_timesteps = self.inference_timesteps
+            ref_sigmas = self.inference_sigmas
+        else:
+            ref_timesteps = self.timesteps
+            ref_sigmas = self.sigmas
+
         # Get sigma for given timestep
-        timesteps = timesteps.to(self.timesteps.device)
-        timestep_ids = torch.argmin((self.timesteps.unsqueeze(0) - timesteps.unsqueeze(1)).abs(), dim=1)
-        sigmas = self.sigmas[timestep_ids].to(original_samples.device, original_samples.dtype)
+        timesteps = timesteps.to(ref_timesteps.device)
+        timestep_ids = torch.argmin((ref_timesteps.unsqueeze(0) - timesteps.unsqueeze(1)).abs(), dim=1)
+        sigmas = ref_sigmas[timestep_ids].to(original_samples.device, original_samples.dtype)
 
         # Reshape sigma for broadcasting
         while sigmas.dim() < original_samples.dim():
@@ -173,10 +181,22 @@ class QwenFlowMatchScheduler:
         return noisy_samples
 
     def get_sigma(self, timesteps: torch.Tensor) -> torch.Tensor:
-        """Get sigma values for given timesteps."""
-        timesteps = timesteps.to(self.timesteps.device)
-        timestep_ids = torch.argmin((self.timesteps.unsqueeze(0) - timesteps.unsqueeze(1)).abs(), dim=1)
-        return self.sigmas[timestep_ids]
+        """Get sigma values for given timesteps.
+
+        Uses inference schedule if available (set by set_timesteps()),
+        otherwise falls back to training schedule.
+        """
+        # Use inference schedule if available (matches DiffSynth behavior)
+        if hasattr(self, 'inference_timesteps') and hasattr(self, 'inference_sigmas'):
+            ref_timesteps = self.inference_timesteps
+            ref_sigmas = self.inference_sigmas
+        else:
+            ref_timesteps = self.timesteps
+            ref_sigmas = self.sigmas
+
+        timesteps = timesteps.to(ref_timesteps.device)
+        timestep_ids = torch.argmin((ref_timesteps.unsqueeze(0) - timesteps.unsqueeze(1)).abs(), dim=1)
+        return ref_sigmas[timestep_ids]
 
     def step(
         self,
