@@ -257,10 +257,34 @@ class QwenTextEncoderWrapper(nn.Module):
             state_dict = {}
             for f in tqdm(safetensor_files, desc="Loading text encoder shards", unit="file"):
                 state_dict.update(load_file(f))
+
+            # Debug: show sample keys before conversion
+            sample_keys_before = list(state_dict.keys())[:5]
+            has_visual = any(k.startswith("visual.") for k in state_dict.keys())
+            has_model = any(k.startswith("model.") for k in state_dict.keys())
+            print(f"Before conversion: {len(state_dict)} keys, has_visual={has_visual}, has_model={has_model}")
+            print(f"  Sample keys: {sample_keys_before}")
+
             # Convert keys to match model structure
             state_dict = self._convert_state_dict(state_dict)
+
+            # Debug: show sample keys after conversion
+            sample_keys_after = list(state_dict.keys())[:5]
+            has_model_visual = any(k.startswith("model.visual.") for k in state_dict.keys())
+            has_model_lm = any(k.startswith("model.language_model.") for k in state_dict.keys())
+            print(f"After conversion: {len(state_dict)} keys, has_model_visual={has_model_visual}, has_model_lm={has_model_lm}")
+            print(f"  Sample keys: {sample_keys_after}")
+
             print(f"Loading state dict ({len(state_dict)} keys)...")
-            self.text_encoder.load_state_dict(state_dict, strict=False)
+            # Use assign=True to match DiffSynth's loading behavior
+            # This directly assigns tensor references instead of copying data
+            missing, unexpected = self.text_encoder.load_state_dict(state_dict, strict=False, assign=True)
+            print(f"  Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
+            if len(missing) > 0:
+                # Show sample missing keys to diagnose
+                print(f"  Sample missing keys: {missing[:5]}")
+            if len(unexpected) > 0:
+                print(f"  Sample unexpected keys: {unexpected[:5]}")
             print(f"Loaded text encoder from {path}")
 
     @property

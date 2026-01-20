@@ -182,11 +182,14 @@ class QwenImageInferencePipeline:
         vae,
         noise: torch.Tensor,
         conditional_dict: Dict[str, torch.Tensor],
+        unconditional_dict: Optional[Dict[str, torch.Tensor]] = None,
         edit_latent: Optional[torch.Tensor] = None,
         height: int = 1024,
         width: int = 1024,
         return_latents: bool = False,
         num_inference_steps: int = None,
+        cfg_scale: float = 1.0,
+        cfg_norm_rescale: bool = False,
     ) -> torch.Tensor:
         """
         Run full denoising trajectory for inference.
@@ -195,12 +198,15 @@ class QwenImageInferencePipeline:
             generator: QwenDiffusionWrapper model
             vae: QwenVAEWrapper for decoding
             noise: [B, 16, H/8, W/8] initial noise
-            conditional_dict: text conditioning
+            conditional_dict: text conditioning (positive prompt)
+            unconditional_dict: unconditional text conditioning (negative prompt) for CFG
             edit_latent: source image latent for editing
             height: image height
             width: image width
             return_latents: whether to return latents instead of pixels
             num_inference_steps: override number of steps (optional)
+            cfg_scale: classifier-free guidance scale (1.0 = no guidance)
+            cfg_norm_rescale: whether to apply norm rescaling (matches official diffusers)
 
         Returns:
             images: [B, C, H, W] generated images or latents
@@ -231,16 +237,37 @@ class QwenImageInferencePipeline:
                 (batch_size,), timestep_val, device=self.device, dtype=torch.long
             )
 
-            # Get flow prediction (velocity) from model
-            # Pass all edit latents as conditioning context to DiT
-            flow_pred, _ = generator(
+            # Get flow prediction (velocity) from model - positive prompt
+            flow_pred_posi, _ = generator(
                 noisy_latent=noisy_latent,
                 conditional_dict=conditional_dict,
                 timestep=timestep_tensor,
                 height=height,
                 width=width,
-                edit_latents=context_latents,  # Pass all latents as conditioning
+                edit_latents=context_latents,
             )
+
+            # Apply CFG if scale != 1.0
+            if cfg_scale != 1.0 and unconditional_dict is not None:
+                # Get flow prediction with negative/unconditional prompt
+                flow_pred_nega, _ = generator(
+                    noisy_latent=noisy_latent,
+                    conditional_dict=unconditional_dict,
+                    timestep=timestep_tensor,
+                    height=height,
+                    width=width,
+                    edit_latents=context_latents,
+                )
+                # CFG formula: pred = pred_nega + cfg_scale * (pred_posi - pred_nega)
+                flow_pred = flow_pred_nega + cfg_scale * (flow_pred_posi - flow_pred_nega)
+
+                # Apply norm rescaling to match official diffusers behavior
+                if cfg_norm_rescale:
+                    cond_norm = torch.norm(flow_pred_posi, dim=1, keepdim=True)
+                    noise_norm = torch.norm(flow_pred, dim=1, keepdim=True)
+                    flow_pred = flow_pred * (cond_norm / (noise_norm + 1e-8))
+            else:
+                flow_pred = flow_pred_posi
 
             # Use flow matching step: x_{t-1} = x_t + v * (sigma_{t-1} - sigma_t)
             if step_idx + 1 < len(timesteps):

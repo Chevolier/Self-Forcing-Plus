@@ -42,9 +42,13 @@ def parse_args():
     parser.add_argument("--num_inference_steps", type=int, default=8,
                         help="Number of inference steps")
     parser.add_argument("--cfg_scale", type=float, default=1.0,
-                        help="CFG scale (currently not implemented, kept for compatibility)")
+                        help="CFG scale for classifier-free guidance (1.0 = no guidance)")
     parser.add_argument("--prompt", type=str, default="",
                         help="Text prompt for image editing")
+    parser.add_argument("--negative_prompt", type=str, default="",
+                        help="Negative prompt for CFG (used when cfg_scale > 1.0)")
+    parser.add_argument("--cfg_norm_rescale", action="store_true",
+                        help="Enable CFG norm rescaling (matches official diffusers behavior)")
     parser.add_argument("--seed", type=int, default=0,
                         help="Random seed for reproducibility")
     parser.add_argument("--config_name", type=str, default=None,
@@ -149,6 +153,19 @@ def setup_output_dirs(output_dir: str, config_name: str) -> tuple:
     return config_dir, images_dir
 
 
+def convert_peft_state_dict(state_dict: dict) -> dict:
+    """Convert PEFT format LoRA state dict keys to match our model structure.
+
+    Both checkpoint and model use the same PEFT format:
+    model.base_model.model.transformer_blocks.0.attn.to_q.lora_A.default.weight
+
+    No conversion needed - just pass through the keys as-is.
+    The '.default' is the adapter name and must be kept.
+    """
+    # No conversion needed - keys already match
+    return state_dict
+
+
 def load_lora_weights(model: QwenDiffusionWrapper, lora_path: str):
     """Load LoRA weights from checkpoint."""
     if os.path.isdir(lora_path):
@@ -172,10 +189,23 @@ def load_lora_weights(model: QwenDiffusionWrapper, lora_path: str):
             checkpoint = torch.load(lora_path, map_location="cpu")
             state_dict = checkpoint.get("generator", checkpoint)
 
+    # Convert PEFT format keys to our model format
+    state_dict = convert_peft_state_dict(state_dict)
+    print(f"  Converted {len(state_dict)} LoRA keys from PEFT format")
+    print(f"  Sample converted keys: {list(state_dict.keys())[:3]}")
+
+    # Debug: show what LoRA keys the model actually has
+    model_lora_keys = [k for k in model.state_dict().keys() if 'lora' in k.lower()]
+    print(f"  Model has {len(model_lora_keys)} LoRA keys")
+    if model_lora_keys:
+        print(f"  Sample model LoRA keys: {model_lora_keys[:3]}")
+
     # Load with strict=False for LoRA (only loads matching keys)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     print(f"Loaded LoRA weights from {lora_path}")
     print(f"  Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
+    if len(unexpected) > 0:
+        print(f"  Sample unexpected keys: {unexpected[:5]}")
 
     return model
 
@@ -234,6 +264,7 @@ def run_inference(
     device: torch.device,
     dtype: torch.dtype,
     custom_timesteps: Optional[torch.Tensor] = None,
+    unconditional_dict: Optional[dict] = None,
 ) -> tuple:
     """
     Run inference and return the output image, inference time, and peak memory.
@@ -242,6 +273,7 @@ def run_inference(
         edit_images: List of PIL images [cloth_image, model_image]. All images are
                     passed to DiT as conditioning. The last image (model_image) is
                     used for noise initialization.
+        unconditional_dict: Unconditional text embeddings for CFG (optional).
     """
     # Get output size from the LAST image (model_image) - this is for the denoising target
     target_height, target_width = get_target_size(
@@ -320,11 +352,14 @@ def run_inference(
             vae=vae,
             noise=noise,
             conditional_dict=conditional_dict,
+            unconditional_dict=unconditional_dict,
             edit_latent=edit_latent,
             height=target_height,
             width=target_width,
             return_latents=False,
             num_inference_steps=args.num_inference_steps if custom_timesteps is None else None,
+            cfg_scale=args.cfg_scale,
+            cfg_norm_rescale=args.cfg_norm_rescale,
         )
 
     if device.type == "cuda":
@@ -398,6 +433,13 @@ def main():
     prompt = args.prompt
     print(f"Using prompt: '{prompt}'")
 
+    # CFG settings
+    if args.cfg_scale != 1.0:
+        print(f"Using CFG scale: {args.cfg_scale}")
+        print(f"Negative prompt: '{args.negative_prompt}'")
+        if args.cfg_norm_rescale:
+            print("CFG norm rescaling: enabled")
+
     # Determine which columns to use for images
     edit_column = args.edit_image_column
     has_cloth_column = 'cloth_image' in test_df.columns
@@ -434,10 +476,18 @@ def main():
             text_encoder, prompt, warmup_images, device, dtype
         )
 
+        # Encode negative prompt for CFG if needed
+        warmup_unconditional_dict = None
+        if args.cfg_scale != 1.0:
+            warmup_unconditional_dict = encode_prompt_with_images(
+                text_encoder, args.negative_prompt, warmup_images, device, dtype
+            )
+
         for i in range(args.warmup_runs):
             _, warmup_time, warmup_mem = run_inference(
                 generator, vae, pipeline, warmup_conditional_dict,
-                warmup_images, args, device, dtype, custom_timesteps
+                warmup_images, args, device, dtype, custom_timesteps,
+                unconditional_dict=warmup_unconditional_dict
             )
             print(f"  Warmup {i+1}: {warmup_time:.3f}s, peak_memory={warmup_mem:.2f}GB")
 
@@ -463,6 +513,14 @@ def main():
         conditional_dict = encode_prompt_with_images(
             text_encoder, prompt, edit_images, device, dtype
         )
+
+        # Encode negative prompt for CFG if needed
+        unconditional_dict = None
+        if args.cfg_scale != 1.0:
+            unconditional_dict = encode_prompt_with_images(
+                text_encoder, args.negative_prompt, edit_images, device, dtype
+            )
+
         if device.type == "cuda":
             torch.cuda.synchronize()
         text_encode_time = time.perf_counter() - text_encode_start
@@ -471,7 +529,8 @@ def main():
         # DiT sees edit images at 1024x1024 area as latents
         output_image, inference_time, peak_memory_gb = run_inference(
             generator, vae, pipeline, conditional_dict,
-            edit_images, args, device, dtype, custom_timesteps
+            edit_images, args, device, dtype, custom_timesteps,
+            unconditional_dict=unconditional_dict
         )
 
         # Debug: print timing breakdown
