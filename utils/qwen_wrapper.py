@@ -186,9 +186,9 @@ class QwenFlowMatchScheduler:
         next_timestep: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Perform one denoising step."""
-        sigma = self.get_sigma(timestep).to(sample.device, sample.dtype)
+        sigma = self.get_sigma(timestep).to(sample.device)
         if next_timestep is not None:
-            sigma_next = self.get_sigma(next_timestep).to(sample.device, sample.dtype)
+            sigma_next = self.get_sigma(next_timestep).to(sample.device)
         else:
             sigma_next = torch.zeros_like(sigma)
 
@@ -196,8 +196,13 @@ class QwenFlowMatchScheduler:
             sigma = sigma.unsqueeze(-1)
             sigma_next = sigma_next.unsqueeze(-1)
 
+        # Upcast to float32 to avoid precision issues (matching DiffSynth/official diffusers scheduler)
+        original_dtype = sample.dtype
+        sample = sample.to(torch.float32)
         # Flow matching step: x_{t-1} = x_t + v * (sigma_{t-1} - sigma_t)
-        prev_sample = sample + model_output * (sigma_next - sigma)
+        prev_sample = sample + model_output.to(torch.float32) * (sigma_next - sigma).to(torch.float32)
+        # Cast back to original dtype
+        prev_sample = prev_sample.to(original_dtype)
         return prev_sample
 
 

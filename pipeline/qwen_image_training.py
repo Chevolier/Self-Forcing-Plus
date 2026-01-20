@@ -214,10 +214,13 @@ class QwenImageInferencePipeline:
         batch_size = noise.shape[0]
         steps = num_inference_steps or self.num_inference_steps
 
-        # Set timesteps using scheduler
+        # Set timesteps using scheduler with dynamic shift based on image size
+        # This matches DiffSynth's behavior: dynamic_shift_len = (height // 16) * (width // 16)
+        dynamic_shift_len = (height // 16) * (width // 16)
         generator.scheduler.set_timesteps(
             num_inference_steps=steps,
             device=self.device,
+            dynamic_shift_len=dynamic_shift_len,
         )
         timesteps = generator.scheduler.get_inference_timesteps()
 
@@ -262,9 +265,10 @@ class QwenImageInferencePipeline:
                 flow_pred = flow_pred_nega + cfg_scale * (flow_pred_posi - flow_pred_nega)
 
                 # Apply norm rescaling to match official diffusers behavior
+                # DiffSynth uses dim=-1 (last dimension) for norm calculation
                 if cfg_norm_rescale:
-                    cond_norm = torch.norm(flow_pred_posi, dim=1, keepdim=True)
-                    noise_norm = torch.norm(flow_pred, dim=1, keepdim=True)
+                    cond_norm = torch.norm(flow_pred_posi, dim=-1, keepdim=True)
+                    noise_norm = torch.norm(flow_pred, dim=-1, keepdim=True)
                     flow_pred = flow_pred * (cond_norm / (noise_norm + 1e-8))
             else:
                 flow_pred = flow_pred_posi
