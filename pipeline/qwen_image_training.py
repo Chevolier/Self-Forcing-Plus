@@ -235,10 +235,10 @@ class QwenImageInferencePipeline:
 
         # Denoising loop
         for step_idx, timestep in enumerate(timesteps):
-            # Keep timestep as float (matching DiffSynth's dtype=self.torch_dtype)
-            # Using torch.long truncates float timesteps like 956.789 to 956!
+            # Keep timestep as float and convert to model dtype (matching DiffSynth)
+            # DiffSynth: timestep = timestep.unsqueeze(0).to(dtype=self.torch_dtype, device=self.device)
             timestep_tensor = timestep.unsqueeze(0) if isinstance(timestep, torch.Tensor) else torch.tensor([timestep], device=self.device)
-            timestep_tensor = timestep_tensor.to(device=self.device)
+            timestep_tensor = timestep_tensor.to(device=self.device, dtype=noise.dtype)
 
             # Get flow prediction (velocity) from model - positive prompt
             flow_pred_posi, _ = generator(
@@ -276,9 +276,9 @@ class QwenImageInferencePipeline:
             # Use flow matching step: x_{t-1} = x_t + v * (sigma_{t-1} - sigma_t)
             if step_idx + 1 < len(timesteps):
                 next_t = timesteps[step_idx + 1]
-                # Keep as tensor to preserve float precision
+                # Keep as tensor with same dtype as timestep (matching DiffSynth)
                 next_t_tensor = next_t.unsqueeze(0) if isinstance(next_t, torch.Tensor) else torch.tensor([next_t], device=self.device)
-                next_t_tensor = next_t_tensor.to(device=self.device)
+                next_t_tensor = next_t_tensor.to(device=self.device, dtype=noise.dtype)
                 noisy_latent = generator.scheduler.step(
                     model_output=flow_pred,
                     timestep=timestep_tensor,
