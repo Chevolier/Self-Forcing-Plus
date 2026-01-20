@@ -322,13 +322,15 @@ def run_inference(
             print(f"  [DEBUG] edit_latent type: {type(edit_latent)}, len: {len(edit_latent) if isinstance(edit_latent, list) else 'N/A'}")
 
     # Generate noise - use target size from LAST image (model_image)
+    # IMPORTANT: DiffSynth generates noise on CPU then moves to GPU
+    # This ensures reproducibility across different GPU types
     latent_height = target_height // 8
     latent_width = target_width // 8
     noise = torch.randn(
         1, 16, latent_height, latent_width,
-        device=device, dtype=dtype,
-        generator=torch.Generator(device=device).manual_seed(args.seed),
-    )
+        device="cpu", dtype=dtype,
+        generator=torch.Generator(device="cpu").manual_seed(args.seed),
+    ).to(device=device)
 
     # Set custom timesteps if provided
     if custom_timesteps is not None:
