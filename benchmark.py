@@ -253,6 +253,7 @@ def run_inference(
 
     # Preprocess and encode edit images - EACH image resized independently
     # This matches DiffSynth's QwenImageUnit_EditImageEmbedder behavior
+    vae_encode_start = time.perf_counter()
     edit_latents = []
     with torch.no_grad():
         for img in edit_images:
@@ -276,8 +277,13 @@ def run_inference(
         else:
             edit_latent = edit_latents[0]  # Single tensor for single image
 
-        # Debug: print latent shapes
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        vae_encode_time = time.perf_counter() - vae_encode_start
+
+        # Debug: print latent shapes and VAE timing
         if hasattr(args, 'debug') and args.debug:
+            print(f"  [DEBUG] VAE encoding: {vae_encode_time:.3f}s")
             print(f"  [DEBUG] Number of edit images: {len(edit_images)}")
             for i, lat in enumerate(edit_latents):
                 print(f"  [DEBUG] edit_latent[{i}] shape: {lat.shape}")
@@ -453,9 +459,13 @@ def main():
 
         # Encode prompt with edit images (multimodal)
         # Text encoder sees images at 384x384 area for understanding
+        text_encode_start = time.perf_counter()
         conditional_dict = encode_prompt_with_images(
             text_encoder, prompt, edit_images, device, dtype
         )
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        text_encode_time = time.perf_counter() - text_encode_start
 
         # Run inference
         # DiT sees edit images at 1024x1024 area as latents
@@ -463,6 +473,10 @@ def main():
             generator, vae, pipeline, conditional_dict,
             edit_images, args, device, dtype, custom_timesteps
         )
+
+        # Debug: print timing breakdown
+        if args.debug:
+            print(f"  [DEBUG] Text encoding: {text_encode_time:.3f}s, Inference: {inference_time:.3f}s")
 
         # Save output image
         output_filename = f"sample_{idx:04d}.png"
