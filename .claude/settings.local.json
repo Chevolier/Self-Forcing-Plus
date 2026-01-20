@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(conda activate:*)",
+      "Bash(CUDA_VISIBLE_DEVICES=1 python:*)",
+      "Bash(source activate self_forcing)",
+      "Bash(CUDA_VISIBLE_DEVICES=7 timeout 120 python:*)",
+      "Bash(python -c:*)"
     ]
   }
 }

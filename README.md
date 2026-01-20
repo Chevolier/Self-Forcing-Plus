@@ -104,19 +104,44 @@ nohup bash scripts/train_qwen_dmd.sh > logs/dmd.out 2>&1 &
 
 ```bash
 # Evaluate DMD trained LoRA models
-      --lora_path /home/ec2-user/SageMaker/efs/Projects/Self-Forcing-Plus/checkpoints/checkpoint_000100/generator.safetensors \
-
-CUDA_VISIBLE_DEVICES=1 python benchmark.py \
+CUDA_VISIBLE_DEVICES=5 python benchmark.py \
       --model_path /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/checkpoints/Qwen-Image-Edit-2509-step4000 \
       --test_path /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/data/test_data.csv \
       --data_dir /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/data \
-      --output_dir outputs/H100_ckpt4k_dmd_sam3k_tstep200_istep8 \
+      --output_dir /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/outputs/H100_ckpt4k_dmd_istep40_cfg4 \
+      --cfg_scale 4 \
+      --num_inference_steps 40 \
+      --prompt "让图2的模特换上图1的下装" \
+      --max_samples 50 \
+      --seed 0 \
+      > /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/logs/H100_ckpt4k_dmd_istep40_cfg4.out 2>&1 &
+
+CUDA_VISIBLE_DEVICES=6 python benchmark.py \
+      --model_path /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/checkpoints/Qwen-Image-Edit-2509-step4000 \
+      --test_path /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/data/test_data.csv \
+      --data_dir /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/data \
+      --output_dir /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/outputs/H100_ckpt4k_dmd_istep8_cfg1 \
       --cfg_scale 1 \
       --num_inference_steps 8 \
       --prompt "让图2的模特换上图1的下装" \
       --max_samples 50 \
-      --seed 1 \
-      > logs/H100_ckpt4k_dmd_sam3k_tstep200_istep8.out 2>&1 &
+      --seed 0 \
+      > /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/logs/H100_ckpt4k_dmd_istep8_cfg1.out 2>&1 &
+
+
+CUDA_VISIBLE_DEVICES=7 python benchmark.py \
+      --model_path /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/checkpoints/Qwen-Image-Edit-2509-step4000 \
+      --lora_path /home/ec2-user/SageMaker/efs/Projects/Self-Forcing-Plus/checkpoints/checkpoint_000200/generator.safetensors \
+      --test_path /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/data/test_data.csv \
+      --data_dir /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/data \
+      --output_dir /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/outputs/H100_ckpt4k_dmd_sam3k_tstep200_istep8 \
+      --cfg_scale 1 \
+      --num_inference_steps 8 \
+      --prompt "让图2的模特换上图1的下装" \
+      --max_samples 50 \
+      --seed 0 \
+      --debug \
+      > /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/logs/H100_ckpt4k_dmd_sam3k_tstep200_istep8.out 2>&1 &
 
 ```
 
