@@ -71,8 +71,6 @@ def parse_args():
                         help="Custom timesteps as comma-separated values")
     parser.add_argument("--edit_image_column", type=str, default="model_image",
                         help="Column name for edit image in CSV (default: model_image)")
-    parser.add_argument("--concat_images", action="store_true",
-                        help="Concatenate multiple images along channel dimension")
     return parser.parse_args()
 
 
@@ -239,9 +237,9 @@ def run_inference(
     Run inference and return the output image, inference time, and peak memory.
 
     Args:
-        edit_images: List of PIL images. If concat_images=True, all images are
-                    concatenated along channel dimension. Otherwise, only the
-                    last image is used as edit_latent.
+        edit_images: List of PIL images [cloth_image, model_image]. All images are
+                    passed to DiT as conditioning. The last image (model_image) is
+                    used for noise initialization.
     """
     # Get output size from the LAST image (model_image) - this is for the denoising target
     target_height, target_width = get_target_size(
@@ -389,7 +387,7 @@ def main():
     edit_column = args.edit_image_column
     has_cloth_column = 'cloth_image' in test_df.columns
     print(f"Edit image column: {edit_column}")
-    if args.concat_images and has_cloth_column:
+    if has_cloth_column:
         print("Multi-image mode: concatenating cloth_image and model_image")
 
     def encode_prompt_with_images(text_encoder, prompt, edit_images, device, dtype):
@@ -410,7 +408,7 @@ def main():
     if args.warmup_runs > 0 and len(test_df) > 0:
         print(f"Running {args.warmup_runs} warmup run(s)...")
         warmup_images = []
-        if args.concat_images and has_cloth_column:
+        if has_cloth_column:
             warmup_cloth = os.path.join(args.data_dir, test_df.loc[0, 'cloth_image'])
             warmup_images.append(Image.open(warmup_cloth).convert("RGB"))
         warmup_model = os.path.join(args.data_dir, test_df.loc[0, edit_column])
@@ -436,8 +434,8 @@ def main():
     for idx in tqdm(range(len(test_df)), desc="Processing"):
         edit_images = []
 
-        # Load images based on mode
-        if args.concat_images and has_cloth_column:
+        # Load images - always include cloth_image if available
+        if has_cloth_column:
             cloth_image_path = os.path.join(args.data_dir, test_df.loc[idx, 'cloth_image'])
             edit_images.append(Image.open(cloth_image_path).convert("RGB"))
 
@@ -475,8 +473,8 @@ def main():
             'peak_gpu_memory_gb': peak_memory_gb,
         }
 
-        # Add cloth image info if using multi-image mode
-        if args.concat_images and has_cloth_column:
+        # Add cloth image info if available
+        if has_cloth_column:
             result_entry['cloth_image'] = test_df.loc[idx, 'cloth_image']
             result_entry['cloth_image_width'] = edit_images[0].size[0]
             result_entry['cloth_image_height'] = edit_images[0].size[1]
