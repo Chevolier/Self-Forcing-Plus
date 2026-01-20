@@ -673,7 +673,8 @@ class QwenImageDiT(torch.nn.Module):
             edit_latents: Optional list of [B, C, H, W] edit image latents for conditioning
         """
         # Build img_shapes for position embeddings
-        img_shapes = [(latents.shape[0], latents.shape[2]//2, latents.shape[3]//2)]
+        # First element is 1 (layer_num), matching DiffSynth's model_fn_qwen_image
+        img_shapes = [(1, latents.shape[2]//2, latents.shape[3]//2)]
         txt_seq_lens = prompt_emb_mask.sum(dim=1).tolist()
 
         # Process main latents
@@ -685,6 +686,7 @@ class QwenImageDiT(torch.nn.Module):
         if edit_latents is not None:
             edit_latents_list = edit_latents if isinstance(edit_latents, list) else [edit_latents]
             for e in edit_latents_list:
+                # Use e.shape[0] (batch size) to match DiffSynth line 804
                 img_shapes.append((e.shape[0], e.shape[2]//2, e.shape[3]//2))
             edit_images = [
                 rearrange(e, "B C (H P) (W Q) -> B (H W) (C P Q)", H=e.shape[2]//2, W=e.shape[3]//2, P=2, Q=2)

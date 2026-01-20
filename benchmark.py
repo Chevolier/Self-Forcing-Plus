@@ -71,6 +71,8 @@ def parse_args():
                         help="Custom timesteps as comma-separated values")
     parser.add_argument("--edit_image_column", type=str, default="model_image",
                         help="Column name for edit image in CSV (default: model_image)")
+    parser.add_argument("--debug", action="store_true",
+                        help="Print debug information about shapes and processing")
     return parser.parse_args()
 
 
@@ -273,6 +275,13 @@ def run_inference(
             edit_latent = edit_latents  # Pass as list for multi-image
         else:
             edit_latent = edit_latents[0]  # Single tensor for single image
+
+        # Debug: print latent shapes
+        if hasattr(args, 'debug') and args.debug:
+            print(f"  [DEBUG] Number of edit images: {len(edit_images)}")
+            for i, lat in enumerate(edit_latents):
+                print(f"  [DEBUG] edit_latent[{i}] shape: {lat.shape}")
+            print(f"  [DEBUG] edit_latent type: {type(edit_latent)}, len: {len(edit_latent) if isinstance(edit_latent, list) else 'N/A'}")
 
     # Generate noise - use target size from LAST image (model_image)
     latent_height = target_height // 8
