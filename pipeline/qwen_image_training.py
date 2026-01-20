@@ -215,25 +215,14 @@ class QwenImageInferencePipeline:
         )
         timesteps = generator.scheduler.get_inference_timesteps()
 
-        # Handle edit_latent as single tensor or list of tensors
-        # For multi-image editing: list of [cloth_latent, model_latent]
-        # - Initialization uses the LAST latent (model_image - the one to edit)
-        # - DiT context receives ALL latents (both cloth and model)
-        if edit_latent is not None:
-            if isinstance(edit_latent, list):
-                # Multi-image: use last (model_image) for init, all for context
-                init_latent = edit_latent[-1]
-                context_latents = edit_latent
-            else:
-                # Single image: use same for init and context
-                init_latent = edit_latent
-                context_latents = edit_latent
-
-            first_sigma = generator.scheduler.inference_sigmas[0].item()
-            noisy_latent = (1 - first_sigma) * init_latent + first_sigma * noise
-        else:
-            noisy_latent = noise
-            context_latents = None
+        # Handle edit_latent for DiT conditioning
+        # IMPORTANT: In DiffSynth's edit_image mode, latents start from PURE NOISE.
+        # Edit images provide context through:
+        # 1. Text encoder multimodal conditioning (384x384 area)
+        # 2. DiT attention conditioning (concatenated in sequence dimension)
+        # They do NOT initialize the latents - this is different from img2img!
+        noisy_latent = noise  # Always start from pure noise, matching DiffSynth
+        context_latents = edit_latent  # Pass edit_latent for DiT conditioning only
 
         # Denoising loop
         for step_idx, timestep in enumerate(timesteps):
