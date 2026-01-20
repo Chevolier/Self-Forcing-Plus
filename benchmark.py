@@ -115,23 +115,40 @@ def get_target_size(image: Image.Image, max_pixels: int, height_div: int, width_
     return int(calc_height), int(calc_width)
 
 
-def preprocess_image(image: Image.Image, target_height: int, target_width: int) -> torch.Tensor:
+def preprocess_image(
+    image: Image.Image,
+    target_height: int,
+    target_width: int,
+    torch_dtype: torch.dtype = None,
+) -> torch.Tensor:
     """
     Preprocess PIL image to tensor for VAE encoding.
     Returns tensor in [-1, 1] range with shape [1, 3, H, W].
+
+    Matches DiffSynth's preprocess_image behavior exactly:
+    - Uses BICUBIC resize (default)
+    - Converts through numpy with float32 intermediate
+    - Scales to [-1, 1] AFTER dtype conversion (matching DiffSynth)
     """
-    # Resize to target dimensions
-    image = image.resize((target_width, target_height), Image.LANCZOS)
+    import numpy as np
+    from einops import rearrange
 
-    # Convert to tensor
-    import torchvision.transforms.functional as TF
-    tensor = TF.to_tensor(image)  # [0, 1] range
+    # Resize to target dimensions - use BICUBIC (default) to match DiffSynth
+    # DiffSynth uses image.resize() without resample arg, which defaults to BICUBIC
+    image = image.resize((target_width, target_height), Image.BICUBIC)
 
-    # Scale to [-1, 1]
-    tensor = tensor * 2 - 1
+    # Match DiffSynth's exact conversion:
+    # image = torch.Tensor(np.array(image, dtype=np.float32))  # [H, W, C] float32
+    # image = image.to(dtype=torch_dtype)  # Convert to target dtype FIRST
+    # image = image * (2/255) - 1  # Scale to [-1, 1] in target dtype
+    # image = rearrange(image, "H W C -> 1 C H W")
+    tensor = torch.Tensor(np.array(image, dtype=np.float32))  # [H, W, C] float32 [0, 255]
 
-    # Add batch dimension
-    tensor = tensor.unsqueeze(0)  # [1, 3, H, W]
+    # Scale and rearrange to match DiffSynth exactly
+    # DiffSynth does: image * ((max_value - min_value) / 255) + min_value
+    # With max_value=1, min_value=-1: image * (2/255) - 1
+    tensor = tensor * (2.0 / 255.0) - 1.0  # Scale to [-1, 1]
+    tensor = rearrange(tensor, "H W C -> 1 C H W")  # [1, C, H, W]
 
     return tensor
 
