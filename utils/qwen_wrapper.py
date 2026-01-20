@@ -229,6 +229,22 @@ class QwenTextEncoderWrapper(nn.Module):
 
         self.text_encoder.eval().requires_grad_(False)
 
+    def _convert_state_dict(self, state_dict: dict) -> dict:
+        """Convert state dict keys to match Qwen2_5_VLModel structure.
+
+        This matches DiffSynth's QwenImageTextEncoderStateDictConverter:
+        - visual.X → model.visual.X (vision encoder)
+        - model.X → model.language_model.X (text encoder)
+        """
+        state_dict_ = {}
+        for k, v in state_dict.items():
+            if k.startswith("visual."):
+                k = "model." + k
+            elif k.startswith("model."):
+                k = k.replace("model.", "model.language_model.")
+            state_dict_[k] = v
+        return state_dict_
+
     def _load_weights(self, path: str):
         """Load text encoder weights from safetensors or pytorch files."""
         import glob
@@ -241,6 +257,8 @@ class QwenTextEncoderWrapper(nn.Module):
             state_dict = {}
             for f in tqdm(safetensor_files, desc="Loading text encoder shards", unit="file"):
                 state_dict.update(load_file(f))
+            # Convert keys to match model structure
+            state_dict = self._convert_state_dict(state_dict)
             print(f"Loading state dict ({len(state_dict)} keys)...")
             self.text_encoder.load_state_dict(state_dict, strict=False)
             print(f"Loaded text encoder from {path}")
