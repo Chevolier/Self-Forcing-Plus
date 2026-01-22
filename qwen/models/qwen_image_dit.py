@@ -1,5 +1,6 @@
 import torch, math, functools
 import torch.nn as nn
+import torch.utils.checkpoint
 from typing import Tuple, Optional, Union, List
 from einops import rearrange
 from .general_modules import TimestepEmbeddings, RMSNorm, AdaLayerNorm
@@ -581,6 +582,8 @@ class QwenImageDiT(torch.nn.Module):
         self.norm_out = AdaLayerNorm(3072, single=True)
         self.proj_out = nn.Linear(3072, 64)
 
+        # Gradient checkpointing for memory efficiency
+        self.gradient_checkpointing = False
 
     def process_entity_masks(self, latents, prompt_emb, prompt_emb_mask, entity_prompt_emb, entity_prompt_emb_mask, entity_masks, height, width, image, img_shapes):
         # prompt_emb
@@ -702,12 +705,25 @@ class QwenImageDiT(torch.nn.Module):
         image_rotary_emb = self.pos_embed(img_shapes, txt_seq_lens, device=latents.device)
 
         for block in self.transformer_blocks:
-            text, image = block(
-                image=image,
-                text=text,
-                temb=conditioning,
-                image_rotary_emb=image_rotary_emb,
-            )
+            if torch.is_grad_enabled() and self.gradient_checkpointing:
+                # Use gradient checkpointing to save memory during training
+                def create_custom_forward(module):
+                    def custom_forward(image, text, temb, image_rotary_emb):
+                        return module(image=image, text=text, temb=temb, image_rotary_emb=image_rotary_emb)
+                    return custom_forward
+
+                text, image = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(block),
+                    image, text, conditioning, image_rotary_emb,
+                    use_reentrant=False,
+                )
+            else:
+                text, image = block(
+                    image=image,
+                    text=text,
+                    temb=conditioning,
+                    image_rotary_emb=image_rotary_emb,
+                )
 
         image = self.norm_out(image, conditioning)
         image = self.proj_out(image)

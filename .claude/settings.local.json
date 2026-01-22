@@ -7,7 +7,8 @@
       "Bash(CUDA_VISIBLE_DEVICES=1 python:*)",
       "Bash(source activate self_forcing)",
       "Bash(CUDA_VISIBLE_DEVICES=7 timeout 120 python:*)",
-      "Bash(python -c:*)"
+      "Bash(python -c:*)",
+      "Bash(python -m py_compile:*)"
     ]
   }
 }

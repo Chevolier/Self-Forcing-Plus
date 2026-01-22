@@ -612,27 +612,110 @@ class Trainer:
         return critic_log_dict
 
     def _fwdbwd_one_step_qwen(self, batch, train_generator, text_prompts):
-        """Forward-backward step for QwenDMD model."""
+        """Forward-backward step for QwenDMD model.
+
+        Handles multi-image editing like benchmark.py:
+        1. Load PIL images for text encoder multimodal encoding
+        2. Encode each edit image independently with VAE
+        3. Pass list of edit_latents to the model
+        """
+        from PIL import Image
+        import numpy as np
+        from einops import rearrange
+
         batch_size = len(text_prompts)
 
-        # Encode text prompts
-        with torch.no_grad():
-            conditional_dict = self.model.encode_text(text_prompts)
+        # Helper function to preprocess image for VAE (matches benchmark.py/DiffSynth)
+        def preprocess_image_for_vae(pil_image, target_height, target_width):
+            """Preprocess PIL image to tensor for VAE encoding."""
+            # Resize with BICUBIC (DiffSynth default)
+            width, height = pil_image.size
+            scale = max(target_width / width, target_height / height)
+            new_width = round(width * scale)
+            new_height = round(height * scale)
+            pil_image = pil_image.resize((new_width, new_height), Image.BICUBIC)
 
-            if not getattr(self, "unconditional_dict", None):
+            # Center crop
+            left = (new_width - target_width) // 2
+            top = (new_height - target_height) // 2
+            pil_image = pil_image.crop((left, top, left + target_width, top + target_height))
+
+            # Convert to tensor exactly as DiffSynth does
+            tensor = torch.Tensor(np.array(pil_image, dtype=np.float32))
+            tensor = tensor * (2.0 / 255.0) - 1.0
+            tensor = rearrange(tensor, "H W C -> 1 C H W")
+            return tensor
+
+        def get_target_size(pil_image, max_pixels=1024*1024, height_div=16, width_div=16):
+            """Get target size for image based on max_pixels constraint."""
+            width, height = pil_image.size
+            if width * height > max_pixels:
+                scale = (width * height / max_pixels) ** 0.5
+                height, width = int(height / scale), int(width / scale)
+            height = height // height_div * height_div
+            width = width // width_div * width_div
+            return height, width
+
+        # Load PIL images from paths for multimodal encoding
+        # edit_image_paths is a list of lists (one list per sample in batch)
+        edit_image_paths = batch.get("edit_image_paths", [])
+        pil_images_per_sample = []
+        for sample_paths in edit_image_paths:
+            if sample_paths:
+                pil_images = [Image.open(p).convert("RGB") for p in sample_paths]
+                pil_images_per_sample.append(pil_images)
+            else:
+                pil_images_per_sample.append([])
+
+        # For text encoder multimodal encoding, use images from the first sample
+        # (assuming all samples in batch have similar structure)
+        edit_images_for_text_encoder = pil_images_per_sample[0] if pil_images_per_sample else None
+
+        # Encode text prompts with edit images for multimodal conditioning
+        with torch.no_grad():
+            conditional_dict = self.model.encode_text(
+                text_prompts, edit_images=edit_images_for_text_encoder
+            )
+
+            # For unconditional, we still need to pass edit_images for proper template matching
+            # but use negative prompt text (matches benchmark.py behavior)
+            if not getattr(self, "unconditional_dict", None) or edit_images_for_text_encoder:
+                # Re-encode unconditional when edit_images change
                 unconditional_dict = self.model.encode_text(
-                    [self.config.negative_prompt] * batch_size
+                    [self.config.negative_prompt] * batch_size,
+                    edit_images=edit_images_for_text_encoder
                 )
                 unconditional_dict = {k: v.detach() for k, v in unconditional_dict.items()}
-                self.unconditional_dict = unconditional_dict
+                # Only cache if no edit images (otherwise need to re-encode each batch)
+                if not edit_images_for_text_encoder:
+                    self.unconditional_dict = unconditional_dict
             else:
                 unconditional_dict = self.unconditional_dict
 
-            # Encode source image if available
+            # Encode each edit image independently with VAE (matches benchmark.py)
+            # Each image gets its own target size based on its aspect ratio
             edit_latent = None
-            if batch.get("source_image") is not None and batch["source_image"][0] is not None:
-                source_images = batch["source_image"].to(device=self.device, dtype=self.dtype)
-                edit_latent = self.model.encode_image(source_images)
+            if pil_images_per_sample and pil_images_per_sample[0]:
+                max_pixels = getattr(self.config, "max_pixels", 1024 * 1024)
+                height_div = getattr(self.config, "height_division_factor", 16)
+                width_div = getattr(self.config, "width_division_factor", 16)
+
+                edit_latents = []
+                for pil_image in pil_images_per_sample[0]:
+                    # Each image gets its own target size
+                    img_height, img_width = get_target_size(
+                        pil_image, max_pixels, height_div, width_div
+                    )
+                    tensor = preprocess_image_for_vae(pil_image, img_height, img_width)
+                    tensor = tensor.to(device=self.device, dtype=self.dtype)
+                    latent = self.model.encode_image(tensor)
+                    edit_latents.append(latent)
+
+                # Pass as list for multi-image, single tensor for single image
+                if len(edit_latents) > 1:
+                    edit_latent = edit_latents
+                else:
+                    edit_latent = edit_latents[0]
 
         # Train generator
         if train_generator:

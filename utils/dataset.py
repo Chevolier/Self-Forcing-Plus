@@ -441,14 +441,15 @@ class ImageEditDataset(Dataset):
         """
         Crop and resize image to target size while preserving aspect ratio.
         Compatible with DiffSynth-Studio's ImageCropAndResize logic.
+        Uses BICUBIC interpolation (default in DiffSynth-Studio).
         """
         width, height = image.size
         scale = max(target_width / width, target_height / height)
 
-        # Resize maintaining aspect ratio
+        # Resize maintaining aspect ratio (BICUBIC to match DiffSynth-Studio)
         new_width = round(width * scale)
         new_height = round(height * scale)
-        image = image.resize((new_width, new_height), Image.LANCZOS)
+        image = image.resize((new_width, new_height), Image.BICUBIC)
 
         # Center crop to target size
         left = (new_width - target_width) // 2
@@ -461,22 +462,34 @@ class ImageEditDataset(Dataset):
         """
         Load an image and process it to tensor.
 
+        Uses DiffSynth-Studio's exact preprocessing:
+        - BICUBIC resize (already in _crop_and_resize)
+        - numpy array conversion with explicit float32
+        - (x * 2/255) - 1 normalization
+
         Returns:
             tuple: (image_tensor, height, width)
         """
+        import numpy as np
+        from einops import rearrange
+
         image = Image.open(image_path).convert("RGB")
 
         # Get target size based on max_pixels
         target_height, target_width = self._get_target_size(image)
 
-        # Crop and resize
+        # Crop and resize (BICUBIC)
         image = self._crop_and_resize(image, target_height, target_width)
 
-        # Convert to tensor and normalize to [-1, 1]
-        image = TF.to_tensor(image)
-        image = image * 2.0 - 1.0
+        # Convert to tensor exactly as DiffSynth does:
+        # tensor = torch.Tensor(np.array(image, dtype=np.float32))
+        # tensor = tensor * (2.0 / 255.0) - 1.0
+        # tensor = rearrange(tensor, "H W C -> C H W")
+        tensor = torch.Tensor(np.array(image, dtype=np.float32))
+        tensor = tensor * (2.0 / 255.0) - 1.0
+        tensor = rearrange(tensor, "H W C -> C H W")
 
-        return image, target_height, target_width
+        return tensor, target_height, target_width
 
     def __len__(self):
         return len(self.samples)
@@ -487,6 +500,10 @@ class ImageEditDataset(Dataset):
             "prompts": sample["prompt"],
             "idx": idx,
         }
+
+        # Return edit image paths for loading in training loop
+        # This allows text encoder to use PIL images and VAE to encode with proper sizes
+        result["edit_image_paths"] = sample.get("edit_image_paths", [])
 
         # Load edit images (input images for editing task)
         edit_images = []

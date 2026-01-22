@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 from torch import nn
-from typing import Tuple, Optional, Dict
+from typing import Tuple, Optional, Dict, List, Union
 
 from pipeline import QwenImageTrainingPipeline
 from utils.loss import get_denoising_loss
@@ -187,31 +187,48 @@ class QwenDMD(nn.Module):
         torch.cuda.empty_cache()
         if is_rank_zero:
             print("  [3/3] Fake_score loaded, wrapping with FSDP...", flush=True)
-        self.fake_score = maybe_fsdp_wrap(self.fake_score, "fake_score")
+        self.fake_score = maybe_fsdp_wrap(
+            self.fake_score, "fake_score",
+            cpu_offload=getattr(args, "fake_score_cpu_offload", False)
+        )
         if is_distributed:
             dist.barrier()  # Sync after fake_score init
 
         # Text encoder (frozen)
-        if is_rank_zero:
-            print("  Loading text_encoder...", flush=True)
+        # NOTE: All ranks must load weights because size-based FSDP wrapping
+        # is sensitive to model structure differences. Unlike transformer-based
+        # wrapping (used for DiT), size-based wrapping can desync if parameters
+        # differ between ranks.
+        rank_id = dist.get_rank() if is_distributed else 0
+        print(f"  [Rank {rank_id}] Loading text_encoder (ALL ranks load weights)...", flush=True)
         self.text_encoder = QwenTextEncoderWrapper(
             model_name=self.generator_name,
-            load_weights=is_rank_zero,
+            load_weights=True,  # All ranks load (size-based FSDP is structure-sensitive)
         )
         self.text_encoder.requires_grad_(False)
+        # Count parameters for sanity check
+        num_params = sum(p.numel() for p in self.text_encoder.parameters())
+        print(f"  [Rank {rank_id}] Text encoder loaded: {num_params:,} parameters", flush=True)
+        if is_distributed:
+            dist.barrier()  # Sync after weight loading, before FSDP wrap
+        print(f"  [Rank {rank_id}] FSDP wrapping text_encoder...", flush=True)
         self.text_encoder = maybe_fsdp_wrap(
             self.text_encoder, "text_encoder",
             cpu_offload=getattr(args, "text_encoder_cpu_offload", False)
         )
+        print(f"  [Rank {rank_id}] Text encoder FSDP wrap complete", flush=True)
+        if is_distributed:
+            dist.barrier()  # Sync after text_encoder FSDP wrap
 
-        # VAE (frozen)
-        if is_rank_zero:
-            print("  Loading VAE...", flush=True)
+        # VAE (frozen) - NOT FSDP wrapped, so ALL ranks must load weights
+        print(f"  [Rank {rank_id}] Loading VAE (ALL ranks load weights)...", flush=True)
         self.vae = QwenVAEWrapper(
             model_name=self.generator_name,
-            load_weights=is_rank_zero,
+            load_weights=True,  # All ranks load (VAE is not FSDP wrapped)
         )
         self.vae.requires_grad_(False)
+        vae_params = sum(p.numel() for p in self.vae.parameters())
+        print(f"  [Rank {rank_id}] VAE loaded: {vae_params:,} parameters", flush=True)
 
         # Get scheduler from generator
         self.scheduler = self.generator.scheduler
@@ -464,7 +481,7 @@ class QwenDMD(nn.Module):
         self,
         batch_size: int,
         conditional_dict: Dict[str, torch.Tensor],
-        edit_latent: Optional[torch.Tensor] = None,
+        edit_latent: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], float, float]:
         """
         Run generator through denoising trajectory.
@@ -472,7 +489,9 @@ class QwenDMD(nn.Module):
         Args:
             batch_size: number of samples to generate
             conditional_dict: text conditioning
-            edit_latent: source image latent for editing
+            edit_latent: source image latent(s) for editing. Can be:
+                        - Single tensor [B, 16, H/8, W/8]
+                        - List of tensors for multi-image editing
 
         Returns:
             pred_latent: generated latent
@@ -484,9 +503,15 @@ class QwenDMD(nn.Module):
             self._initialize_inference_pipeline()
 
         # Compute dimensions from edit_latent or use defaults
+        # For multi-image, use the LAST latent (model_image) for output dimensions
+        # This matches benchmark.py behavior
         if edit_latent is not None:
-            # edit_latent already has correct dimensions from dataset processing
-            height, width = self._get_image_size_from_latent(edit_latent)
+            if isinstance(edit_latent, list):
+                # Use last latent for output dimensions (model_image)
+                last_latent = edit_latent[-1]
+                height, width = self._get_image_size_from_latent(last_latent)
+            else:
+                height, width = self._get_image_size_from_latent(edit_latent)
         elif self.height is not None and self.width is not None:
             # Use explicitly configured dimensions
             height, width = self.height, self.width
@@ -526,7 +551,7 @@ class QwenDMD(nn.Module):
         batch_size: int,
         conditional_dict: Dict[str, torch.Tensor],
         unconditional_dict: Optional[Dict[str, torch.Tensor]] = None,
-        edit_latent: Optional[torch.Tensor] = None,
+        edit_latent: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None,
     ) -> Tuple[torch.Tensor, dict]:
         """
         Generate images from noise and compute DMD loss.
@@ -535,7 +560,9 @@ class QwenDMD(nn.Module):
             batch_size: number of samples
             conditional_dict: text conditioning
             unconditional_dict: unconditional text for CFG
-            edit_latent: source image latent for editing
+            edit_latent: source image latent(s) for editing. Can be:
+                        - Single tensor [B, 16, H/8, W/8]
+                        - List of tensors for multi-image editing
 
         Returns:
             loss: generator loss
@@ -566,7 +593,7 @@ class QwenDMD(nn.Module):
         batch_size: int,
         conditional_dict: Dict[str, torch.Tensor],
         unconditional_dict: Optional[Dict[str, torch.Tensor]] = None,
-        edit_latent: Optional[torch.Tensor] = None,
+        edit_latent: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None,
     ) -> Tuple[torch.Tensor, dict]:
         """
         Generate images and train the fake score (critic) on them.
@@ -575,7 +602,9 @@ class QwenDMD(nn.Module):
             batch_size: number of samples
             conditional_dict: text conditioning
             unconditional_dict: unconditional text for CFG
-            edit_latent: source image latent for editing
+            edit_latent: source image latent(s) for editing. Can be:
+                        - Single tensor [B, 16, H/8, W/8]
+                        - List of tensors for multi-image editing
 
         Returns:
             loss: critic denoising loss
@@ -657,9 +686,23 @@ class QwenDMD(nn.Module):
 
         return denoising_loss, log_dict
 
-    def encode_text(self, prompts: list) -> Dict[str, torch.Tensor]:
-        """Encode text prompts to embeddings."""
-        return self.text_encoder(prompts)
+    def encode_text(
+        self,
+        prompts: list,
+        edit_images: Optional[list] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Encode text prompts to embeddings, optionally with edit images.
+
+        Args:
+            prompts: List of text prompts
+            edit_images: Optional list of PIL images for multimodal encoding.
+                        Images will be resized to 384x384 area for text encoder.
+
+        Returns:
+            Dict with 'prompt_embeds' and 'attention_mask'
+        """
+        return self.text_encoder(prompts, edit_images=edit_images)
 
     def encode_image(self, images: torch.Tensor) -> torch.Tensor:
         """Encode images to latent space."""

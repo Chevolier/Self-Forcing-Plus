@@ -98,7 +98,7 @@ train.py \
 
 
 ```bash
-nohup bash scripts/train_qwen_dmd.sh > logs/dmd.out 2>&1 &
+nohup bash scripts/train_qwen_dmd.sh > logs/dmd_1m_r32_v2.out 2>&1 &
 ```
 
 ### Evaluation
@@ -129,10 +129,10 @@ CUDA_VISIBLE_DEVICES=6 python benchmark.py \
       --seed 0 \
       > /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/logs/H100_ckpt4k_dmd_istep8_cfg1.out 2>&1 &
 
-
-CUDA_VISIBLE_DEVICES=7 python benchmark.py \
+CUDA_VISIBLE_DEVICES=6 python benchmark.py \
       --model_path /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/checkpoints/Qwen-Image-Edit-2509-step4000 \
       --lora_path /home/ec2-user/SageMaker/efs/Projects/Self-Forcing-Plus/checkpoints/checkpoint_000200/generator.safetensors \
+      --lora_rank 32 \
       --test_path /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/data/test_data.csv \
       --data_dir /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/data \
       --output_dir /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/outputs/H100_ckpt4k_dmd_sam3k_tstep200_istep8 \
@@ -143,7 +143,6 @@ CUDA_VISIBLE_DEVICES=7 python benchmark.py \
       --seed 0 \
       --debug \
       > /home/ec2-user/SageMaker/efs/Projects/Qwen-Image-Edit-Acceleration/logs/H100_ckpt4k_dmd_sam3k_tstep200_istep8.out 2>&1 &
-
 ```
 
 Our training run uses 1000 iterations and completes in under 12 hours using 64 H100 GPUs.

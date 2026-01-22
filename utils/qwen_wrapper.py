@@ -751,7 +751,16 @@ class QwenDiffusionWrapper(nn.Module):
 
     def enable_gradient_checkpointing(self):
         """Enable gradient checkpointing for memory efficiency."""
-        self.model.gradient_checkpointing = True
+        # When PEFT/LoRA is enabled, self.model is PeftModel, need to get base model
+        if hasattr(self.model, 'get_base_model'):
+            # PEFT wrapped model
+            base_model = self.model.get_base_model()
+            base_model.gradient_checkpointing = True
+            print(f"Enabled gradient checkpointing on base model (PEFT wrapped)")
+        else:
+            # Direct model
+            self.model.gradient_checkpointing = True
+            print(f"Enabled gradient checkpointing on model")
 
     def forward(
         self,

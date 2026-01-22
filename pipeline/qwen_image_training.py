@@ -6,7 +6,7 @@ Uses num_inference_steps parameter like DiffSynth-Studio.
 
 import torch
 import torch.distributed as dist
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple, Union
 
 
 class QwenImageTrainingPipeline:
@@ -36,7 +36,7 @@ class QwenImageTrainingPipeline:
         noise: torch.Tensor,
         conditional_dict: Dict[str, torch.Tensor],
         unconditional_dict: Optional[Dict[str, torch.Tensor]] = None,
-        edit_latent: Optional[torch.Tensor] = None,
+        edit_latent: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None,
         height: int = 1024,
         width: int = 1024,
     ) -> Tuple[torch.Tensor, torch.Tensor, float, float]:
@@ -48,7 +48,9 @@ class QwenImageTrainingPipeline:
             noise: [B, 16, H/8, W/8] initial noise
             conditional_dict: text conditioning
             unconditional_dict: unconditional text for CFG (optional)
-            edit_latent: [B, 16, H/8, W/8] source image latent for editing
+            edit_latent: source image latent(s) for conditioning. Can be:
+                        - Single tensor [B, 16, H/8, W/8]
+                        - List of tensors for multi-image editing
             height: image height
             width: image width
 
@@ -60,22 +62,23 @@ class QwenImageTrainingPipeline:
         """
         batch_size = noise.shape[0]
 
-        # Set timesteps using scheduler (DiffSynth-Studio style)
+        # Set timesteps using scheduler with dynamic shift (DiffSynth-Studio style)
+        dynamic_shift_len = (height // 16) * (width // 16)
         generator.scheduler.set_timesteps(
             num_inference_steps=self.num_inference_steps,
             device=self.device,
+            dynamic_shift_len=dynamic_shift_len,
         )
         timesteps = generator.scheduler.get_inference_timesteps()
         num_steps = len(timesteps)
 
-        # Initialize noisy input
-        if edit_latent is not None:
-            # For image editing: start from source + noise
-            first_sigma = generator.scheduler.inference_sigmas[0].item()
-            noisy_latent = (1 - first_sigma) * edit_latent + first_sigma * noise
-        else:
-            # For pure generation: start from noise
-            noisy_latent = noise
+        # IMPORTANT: In DiffSynth's edit_image mode, latents start from PURE NOISE.
+        # Edit images provide context through:
+        # 1. Text encoder multimodal conditioning (384x384 area)
+        # 2. DiT attention conditioning (concatenated in sequence dimension)
+        # They do NOT initialize the latents - this is different from img2img!
+        noisy_latent = noise  # Always start from pure noise, matching DiffSynth
+        context_latents = edit_latent  # Pass edit_latent for DiT conditioning only
 
         # Randomly sample exit step (synchronized across ranks)
         exit_step = self._sample_exit_step(num_steps)
@@ -86,33 +89,41 @@ class QwenImageTrainingPipeline:
         next_timestep = None
 
         for step_idx, timestep in enumerate(timesteps):
-            timestep_val = timestep.item() if isinstance(timestep, torch.Tensor) else timestep
-            timestep_tensor = torch.full(
-                (batch_size,), timestep_val, device=self.device, dtype=torch.long
-            )
+            # Keep timestep as float and convert to model dtype (matching DiffSynth)
+            timestep_tensor = timestep.unsqueeze(0) if isinstance(timestep, torch.Tensor) else torch.tensor([timestep], device=self.device)
+            timestep_tensor = timestep_tensor.to(device=self.device, dtype=noise.dtype)
 
             should_exit = (step_idx == exit_step)
 
             if not should_exit:
                 # Run without gradients
                 with torch.no_grad():
-                    _, denoised = generator(
+                    flow_pred, _ = generator(
                         noisy_latent=noisy_latent,
                         conditional_dict=conditional_dict,
                         timestep=timestep_tensor,
                         height=height,
                         width=width,
-                        edit_latents=edit_latent,  # Pass edit latent as conditioning
+                        edit_latents=context_latents,  # Pass as conditioning
                     )
 
-                    # Add noise for next step
+                    # Use flow matching step (matching inference pipeline)
                     if step_idx + 1 < num_steps:
                         next_t = timesteps[step_idx + 1]
-                        next_t_val = next_t.item() if isinstance(next_t, torch.Tensor) else next_t
-                        noisy_latent = generator.scheduler.add_noise(
-                            denoised,
-                            noise,
-                            torch.full((batch_size,), next_t_val, device=self.device),
+                        next_t_tensor = next_t.unsqueeze(0) if isinstance(next_t, torch.Tensor) else torch.tensor([next_t], device=self.device)
+                        next_t_tensor = next_t_tensor.to(device=self.device, dtype=noise.dtype)
+                        noisy_latent = generator.scheduler.step(
+                            model_output=flow_pred,
+                            timestep=timestep_tensor,
+                            sample=noisy_latent,
+                            next_timestep=next_t_tensor,
+                        )
+                    else:
+                        noisy_latent = generator.scheduler.step(
+                            model_output=flow_pred,
+                            timestep=timestep_tensor,
+                            sample=noisy_latent,
+                            next_timestep=None,
                         )
             else:
                 # Run WITH gradients at exit step
@@ -122,9 +133,10 @@ class QwenImageTrainingPipeline:
                     timestep=timestep_tensor,
                     height=height,
                     width=width,
-                    edit_latents=edit_latent,  # Pass edit latent as conditioning
+                    edit_latents=context_latents,  # Pass as conditioning
                 )
 
+                timestep_val = timestep.item() if isinstance(timestep, torch.Tensor) else timestep
                 exit_timestep = timestep_val
                 if step_idx + 1 < num_steps:
                     next_t = timesteps[step_idx + 1]
